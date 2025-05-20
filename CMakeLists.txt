@@ -65,7 +65,7 @@ if(SHADERMAKE_FIND_DXC)
 
         FetchContent_MakeAvailable(dxc)
 
-        set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/dxc")
+        set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/dxc" CACHE INTERNAL "")
     else()
         # Windows, ARM
         FetchContent_Declare(
@@ -77,7 +77,7 @@ if(SHADERMAKE_FIND_DXC)
 
         FetchContent_MakeAvailable(dxc)
 
-        set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/${WINDOWS_SYSTEM}/dxc.exe")
+        set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/${WINDOWS_SYSTEM}/dxc.exe" CACHE INTERNAL "")
     endif()
 
     message("ShaderMake: downloading dxc ${SHADERMAKE_DXC_VERSION}...")
@@ -93,7 +93,7 @@ if(SHADERMAKE_FIND_DXC_SPIRV)
 
     if(NOT SHADERMAKE_DXC_SPIRV_PATH)
         message("ShaderMake: Vulkan SDK is not installed")
-        set(SHADERMAKE_DXC_SPIRV_PATH ${SHADERMAKE_DXC_PATH})
+        set(SHADERMAKE_DXC_SPIRV_PATH ${SHADERMAKE_DXC_PATH} CACHE INTERNAL "")
     endif()
 endif()
 
@@ -168,6 +168,6 @@ message("ShaderMake: SHADERMAKE_DXC_PATH = '${SHADERMAKE_DXC_PATH}'")
 message("ShaderMake: SHADERMAKE_DXC_SPIRV_PATH = '${SHADERMAKE_DXC_SPIRV_PATH}'")
 
 # Compatibility names # TODO: remove
-set(FXC_PATH ${SHADERMAKE_FXC_PATH})
-set(DXC_PATH ${SHADERMAKE_DXC_PATH})
-set(DXC_SPIRV_PATH ${SHADERMAKE_DXC_SPIRV_PATH})
+set(FXC_PATH ${SHADERMAKE_FXC_PATH} CACHE INTERNAL "")
+set(DXC_PATH ${SHADERMAKE_DXC_PATH} CACHE INTERNAL "")
+set(DXC_SPIRV_PATH ${SHADERMAKE_DXC_SPIRV_PATH} CACHE INTERNAL "")
