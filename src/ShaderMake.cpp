@@ -1980,8 +1980,8 @@ int32_t main(int32_t argc, const char** argv)
         // Dump shader blobs
         for (const auto& [blobName, blobEntries] : g_ShaderBlobs)
         {
-            // If a blob would contain one entry with no defines, just skip it:
-            // the individual file's output name is the same as the blob, and we're done here.
+            // If a blob contains one entry with no defines, just skip it.
+            // The individual file's output name is the same as the blob, and we're done here.
             if (blobEntries.size() == 1 && blobEntries[0].combinedDefines.empty())
                 continue;
 
