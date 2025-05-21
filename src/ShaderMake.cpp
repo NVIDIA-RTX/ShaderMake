@@ -93,7 +93,7 @@ struct Options
     const char* compiler = nullptr;
     const char* outputExt = nullptr;
     const char* vulkanMemoryLayout = nullptr;
-    uint32_t sRegShift = 100; // must be first (or change "DxcCompile" code)
+    uint32_t sRegShift = 100;
     uint32_t tRegShift = 200;
     uint32_t bRegShift = 300;
     uint32_t uRegShift = 400;
