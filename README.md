@@ -10,11 +10,11 @@ Features:
 - Outputs results in 3 formats: native binary, header file, and a [binary blob](#user-content-shader-blob-api) containing all permutations for a given shader.
 - Minimizes the number of re-compilation tasks by tracking file modification times and include trees.
 
-During project deployment, the *CMake* script automatically searches for `fxc` and `dxc` and sets these variables:
+During project deployment, the *CMake* script automatically downloads/searches for `fxc` and `dxc` and sets these variables:
 
-- `FXC_PATH` - `fxc` from *Windows SDK*
-- `DXC_PATH` - `dxc` from *Windows SDK*
-- `DXC_SPIRV_PATH` - `dxc` with enabled SPIRV generation from *Vulkan SDK*
+- `SHADERMAKE_FXC_PATH` (and `FXC_PATH`) - path to `fxc` from *Windows SDK*
+- `SHADERMAKE_DXC_PATH` (and `SHADERMAKE_DXC_PATH`) - path to `dxc` from *GitHub*
+- `SHADERMAKE_DXC_SPIRV_PATH` (and `SHADERMAKE_DXC_SPIRV_PATH`) - path to `dxc` from *Vulkan SDK* (with soft fallback to `dxc` from GitHub if requested but *Vulkan SDK* is not found)
 
 ## Command line options
 
@@ -64,7 +64,7 @@ Other options:
 - `--serial` - Disable multi-threading
 - `--flatten` - Flatten source directory structure in the output directory
 - `--continue` - Continue compilation if an error is occured
-- `--useAPI` - Use *FXC (d3dcompiler)* or *DXC (dxcompiler)* API explicitly (Windows only)
+- `--useAPI` - Use *FXC (d3dcompiler)* API explicitly (Windows only)
 - `--colorize` - Colorize console output
 - `--verbose` - Print commands before they are executed
 - `--retryCount` - Retry count for compilation task sub-process failures
