@@ -24,6 +24,7 @@ cmake_dependent_option(SHADERMAKE_FIND_FXC "Find FXC in Windows SDK and populate
 cmake_dependent_option(SHADERMAKE_FIND_DXC "Download DXC from GitHub and populate 'SHADERMAKE_DXC_PATH' (and 'DXC_PATH') variables" ON "NOT APPLE" OFF)
 
 option(SHADERMAKE_FIND_DXC_SPIRV "Find DXC in Vulkan SDK and populate 'SHADERMAKE_DXC_SPIRV_PATH' (and 'DXC_SPIRV_PATH') variables" ON)
+option(SHADERMAKE_FIND_COMPILERS "Master switch" ON)
 
 set(SHADERMAKE_DXC_VERSION "v1.8.2502" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
 set(SHADERMAKE_DXC_DATE "2025_02_20" CACHE STRING "DXC release date") # DXC releases on GitHub have this in download links :(
@@ -52,70 +53,71 @@ else()
     set(WINDOWS_SYSTEM "x64")
 endif()
 
-# DXC (GitHub)
-if(SHADERMAKE_FIND_DXC)
-    if((CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64"))
-        # Linux
-        FetchContent_Declare(
-            dxc
-            DOWNLOAD_EXTRACT_TIMESTAMP 1
-            DOWNLOAD_NO_PROGRESS 1
-            URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/${SHADERMAKE_DXC_VERSION}/linux_dxc_${SHADERMAKE_DXC_DATE}.x86_64.tar.gz
-        )
+# Find compilers
+if(SHADERMAKE_FIND_COMPILERS)
+    # DXC (GitHub)
+    if(SHADERMAKE_FIND_DXC)
+        if((CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64"))
+            # Linux
+            FetchContent_Declare(
+                dxc
+                DOWNLOAD_EXTRACT_TIMESTAMP 1
+                DOWNLOAD_NO_PROGRESS 1
+                URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/${SHADERMAKE_DXC_VERSION}/linux_dxc_${SHADERMAKE_DXC_DATE}.x86_64.tar.gz
+            )
 
-        FetchContent_MakeAvailable(dxc)
+            FetchContent_MakeAvailable(dxc)
 
-        set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/dxc" CACHE INTERNAL "")
-    else()
-        # Windows, ARM
-        FetchContent_Declare(
-            dxc
-            DOWNLOAD_EXTRACT_TIMESTAMP 1
-            DOWNLOAD_NO_PROGRESS 1
-            URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/${SHADERMAKE_DXC_VERSION}/dxc_${SHADERMAKE_DXC_DATE}.zip
-        )
+            set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/dxc" CACHE INTERNAL "")
+        else()
+            # Windows, ARM
+            FetchContent_Declare(
+                dxc
+                DOWNLOAD_EXTRACT_TIMESTAMP 1
+                DOWNLOAD_NO_PROGRESS 1
+                URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/${SHADERMAKE_DXC_VERSION}/dxc_${SHADERMAKE_DXC_DATE}.zip
+            )
 
-        FetchContent_MakeAvailable(dxc)
+            FetchContent_MakeAvailable(dxc)
 
-        set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/${WINDOWS_SYSTEM}/dxc.exe" CACHE INTERNAL "")
+            set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/${WINDOWS_SYSTEM}/dxc.exe" CACHE INTERNAL "")
+        endif()
+
+        message("ShaderMake: downloading dxc ${SHADERMAKE_DXC_VERSION}...")
     endif()
 
-    message("ShaderMake: downloading dxc ${SHADERMAKE_DXC_VERSION}...")
+    # DXC (Vulkan SDK)
+    if(SHADERMAKE_FIND_DXC_SPIRV)
+        if(WIN32)
+            find_program(SHADERMAKE_DXC_SPIRV_PATH "$ENV{VULKAN_SDK}/Bin/dxc")
+        else()
+            find_program(SHADERMAKE_DXC_SPIRV_PATH "dxc")
+        endif()
+
+        if(NOT SHADERMAKE_DXC_SPIRV_PATH)
+            message("ShaderMake: Vulkan SDK is not installed")
+            set(SHADERMAKE_DXC_SPIRV_PATH ${SHADERMAKE_DXC_PATH} CACHE INTERNAL "")
+        endif()
+    endif()
+
+    # FXC (Windows SDK)
+    if(SHADERMAKE_FIND_FXC)
+        if(DEFINED CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+            set(WINDOWS_SDK_VERSION ${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION})
+        elseif(DEFINED ENV{WindowsSDKLibVersion})
+            string(REGEX REPLACE "\\\\$" "" WINDOWS_SDK_VERSION "$ENV{WindowsSDKLibVersion}")
+        else()
+            message(FATAL_ERROR "ShaderMake: WindowsSDK is not installed (CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION is not defined; WindowsSDKLibVersion is '$ENV{WindowsSDKLibVersion}')!")
+        endif()
+
+        get_filename_component(WINDOWS_SDK_ROOT "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]" ABSOLUTE)
+        set(WINDOWS_SDK_BIN "${WINDOWS_SDK_ROOT}/bin/${WINDOWS_SDK_VERSION}/${WINDOWS_SYSTEM}")
+
+        find_program(SHADERMAKE_FXC_PATH "${WINDOWS_SDK_BIN}/fxc")
+    endif()
 endif()
 
-# DXC (Vulkan SDK)
-if(SHADERMAKE_FIND_DXC_SPIRV)
-    if(WIN32)
-        find_program(SHADERMAKE_DXC_SPIRV_PATH "$ENV{VULKAN_SDK}/Bin/dxc")
-    else()
-        find_program(SHADERMAKE_DXC_SPIRV_PATH "dxc")
-    endif()
-
-    if(NOT SHADERMAKE_DXC_SPIRV_PATH)
-        message("ShaderMake: Vulkan SDK is not installed")
-        set(SHADERMAKE_DXC_SPIRV_PATH ${SHADERMAKE_DXC_PATH} CACHE INTERNAL "")
-    endif()
-endif()
-
-# FXC
-if(SHADERMAKE_FIND_FXC)
-    # Find Windows SDK
-    if(DEFINED CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
-        set(WINDOWS_SDK_VERSION ${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION})
-    elseif(DEFINED ENV{WindowsSDKLibVersion})
-        string(REGEX REPLACE "\\\\$" "" WINDOWS_SDK_VERSION "$ENV{WindowsSDKLibVersion}")
-    else()
-        message(FATAL_ERROR "ShaderMake: WindowsSDK is not installed (CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION is not defined; WindowsSDKLibVersion is '$ENV{WindowsSDKLibVersion}')!")
-    endif()
-
-    get_filename_component(WINDOWS_SDK_ROOT "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]" ABSOLUTE)
-    set(WINDOWS_SDK_BIN "${WINDOWS_SDK_ROOT}/bin/${WINDOWS_SDK_VERSION}/${WINDOWS_SYSTEM}")
-
-    # Find FXC
-    find_program(SHADERMAKE_FXC_PATH "${WINDOWS_SDK_BIN}/fxc")
-endif()
-
-# Library with blob read and write functions for use by client projects
+# ShaderMakeBlob
 add_library(ShaderMakeBlob STATIC
     "include/ShaderMake/ShaderBlob.h"
     "src/ShaderBlob.cpp"
@@ -127,7 +129,7 @@ set_target_properties(ShaderMakeBlob PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
-# ShaderMake executable
+# ShaderMake
 add_executable(ShaderMake
     "src/argparse.c"
     "src/argparse.h"
@@ -156,7 +158,7 @@ if(WIN32)
         _CRT_SECURE_NO_WARNINGS
     )
     target_link_libraries(ShaderMake d3dcompiler)
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR APPLE)
+elseif(APPLE)
     target_link_libraries(ShaderMake pthread)
 else()
     target_link_libraries(ShaderMake stdc++fs pthread)
