@@ -57,7 +57,7 @@ endif()
 if(SHADERMAKE_FIND_COMPILERS)
     # DXC (GitHub)
     if(SHADERMAKE_FIND_DXC)
-        if((CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64"))
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             # Linux
             FetchContent_Declare(
                 dxc
