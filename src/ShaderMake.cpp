@@ -42,7 +42,6 @@ THE SOFTWARE.
 
 #ifdef _WIN32
     #include <d3dcompiler.h> // FXC
-    #include <dxcapi.h> // DXC
 
     #include <wrl/client.h>
     using Microsoft::WRL::ComPtr;
@@ -94,7 +93,7 @@ struct Options
     const char* compiler = nullptr;
     const char* outputExt = nullptr;
     const char* vulkanMemoryLayout = nullptr;
-    uint32_t sRegShift = 100; // must be first (or change "DxcCompile" code)
+    uint32_t sRegShift = 100;
     uint32_t tRegShift = 200;
     uint32_t bRegShift = 300;
     uint32_t uRegShift = 400;
@@ -631,7 +630,7 @@ bool Options::Parse(int32_t argc, const char** argv)
             OPT_BOOLEAN(0, "serial", &serial, "Disable multi-threading", nullptr, 0, 0),
             OPT_BOOLEAN(0, "flatten", &flatten, "Flatten source directory structure in the output directory", nullptr, 0, 0),
             OPT_BOOLEAN(0, "continue", &continueOnError, "Continue compilation if an error is occured", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "useAPI", &useAPI, "Use FXC (d3dcompiler) or DXC (dxcompiler) API explicitly (Windows only)", nullptr, 0, 0),
+            OPT_BOOLEAN(0, "useAPI", &useAPI, "Use FXC (d3dcompiler) API explicitly", nullptr, 0, 0),
             OPT_BOOLEAN(0, "colorize", &colorize, "Colorize console output", nullptr, 0, 0),
             OPT_BOOLEAN(0, "verbose", &verbose, "Print commands before they are executed", nullptr, 0, 0),
             OPT_INTEGER(0, "retryCount", &retryCount, "Retry count for compilation task sub-process failures", nullptr, 0, 0),
@@ -660,10 +659,6 @@ bool Options::Parse(int32_t argc, const char** argv)
     argparse_describe(&argparse, nullptr, "\nMulti-threaded shader compiling & processing tool");
     argparse_parse(&argparse, argc, argv);
     
-#ifndef _WIN32
-    useAPI = false;
-#endif
-
     if (!config)
     {
         Printf(RED "ERROR: Config file not specified!\n");
@@ -705,12 +700,6 @@ bool Options::Parse(int32_t argc, const char** argv)
         return false;
     }
     
-    if (slang && useAPI)
-    {
-        Printf(RED "ERROR: Use of Slang with --useAPI is not implemented.\n");
-        return false;
-    }
-
     if (strlen(shaderModel) != 3 || strstr(shaderModel, "."))
     {
         Printf(RED "ERROR: Shader model ('%s') must have format 'X_Y'!\n", shaderModel);
@@ -868,7 +857,7 @@ bool ConfigLine::Parse(int32_t argc, const char** argv)
 }
 
 //=====================================================================================================================
-// FXC/DXC API
+// FXC API
 //=====================================================================================================================
 #ifdef _WIN32
 
@@ -1122,268 +1111,6 @@ void FxcCompile()
         // Terminate if this shader failed and "--continue" is not set
         if (g_Terminate)
             break;
-    }
-}
-
-void DxcCompile()
-{
-    static const wchar_t* optimizationLevelRemap[] = {
-        // Note: if you're getting errors like "error C2065: 'DXC_ARG_SKIP_OPTIMIZATIONS': undeclared identifier" here,
-        // please update the Windows SDK to at least version 10.0.20348.0.
-        DXC_ARG_SKIP_OPTIMIZATIONS,
-        DXC_ARG_OPTIMIZATION_LEVEL1,
-        DXC_ARG_OPTIMIZATION_LEVEL2,
-        DXC_ARG_OPTIMIZATION_LEVEL3,
-    };
-
-    // Gather SPIRV register shifts once
-    static const wchar_t* regShiftArgs[] = {
-        L"-fvk-s-shift",
-        L"-fvk-t-shift",
-        L"-fvk-b-shift",
-        L"-fvk-u-shift",
-    };
-
-    vector<wstring> regShifts;
-    if (!g_Options.noRegShifts)
-    {
-        for (uint32_t reg = 0; reg < 4; reg++)
-        {
-            for (uint32_t space = 0; space < SPIRV_SPACES_NUM; space++)
-            {
-                wchar_t buf[64];
-
-                regShifts.push_back(regShiftArgs[reg]);
-
-                swprintf(buf, COUNT_OF(buf), L"%u", (&g_Options.sRegShift)[reg]);
-                regShifts.push_back(wstring(buf));
-
-                swprintf(buf, COUNT_OF(buf), L"%u", space);
-                regShifts.push_back(wstring(buf));
-            }
-        }
-    }
-
-    // TODO: is a global instance thread safe?
-    ComPtr<IDxcCompiler3> dxcCompiler;
-    HRESULT hr = DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&dxcCompiler));
-    if (FAILED(hr))
-    {
-        // Print a message explaining that we cannot compile anything.
-        // This can happen when the user specifies a DXC version that is too old.
-        lock_guard<mutex> guard(g_TaskMutex);
-        static bool once = true;
-        if (once)
-        {
-            Printf(RED "ERROR: Cannot create an instance of IDxcCompiler3, HRESULT = 0x%08x (%s)\n", hr, std::system_category().message(hr).c_str());
-            once = false;
-        }
-        g_Terminate = true;
-        return;
-    }
-
-    ComPtr<IDxcUtils> dxcUtils;
-    hr = DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&dxcUtils));
-    if (FAILED(hr))
-    {
-        // Also print an error message.
-        // Not sure if this ever happens or all such cases are handled by the condition above, but let's be safe.
-        lock_guard<mutex> guard(g_TaskMutex);
-        static bool once = true;
-        if (once)
-        {
-            Printf(RED "ERROR: Cannot create an instance of IDxcUtils, HRESULT = 0x%08x (%s)\n", hr, std::system_category().message(hr).c_str());
-            once = false;
-        }
-        g_Terminate = true;
-        return;
-    }
-
-    while (!g_Terminate)
-    {
-        // Getting a task in the current thread
-        TaskData taskData;
-        {
-            lock_guard<mutex> guard(g_TaskMutex);
-            if (g_TaskData.empty())
-                return;
-
-            taskData = g_TaskData.back();
-            g_TaskData.pop_back();
-        }
-
-        // Compiling the shader
-        fs::path sourceFile = g_Options.sourceDir / taskData.source;
-        wstring wsourceFile = sourceFile.wstring();
-
-        ComPtr<IDxcBlob> codeBlob;
-        ComPtr<IDxcBlobEncoding> errorBlob;
-        bool isSucceeded = false;
-
-        ComPtr<IDxcBlobEncoding> sourceBlob;
-        hr = dxcUtils->LoadFile(wsourceFile.c_str(), nullptr, &sourceBlob);
-
-        if (SUCCEEDED(hr))
-        {
-            vector<wstring> args;
-            args.reserve(16 + (g_Options.defines.size() + taskData.defines.size() + g_Options.includeDirs.size()) * 2
-                + (g_Options.platform == SPIRV ? regShifts.size() + g_Options.spirvExtensions.size() : 0));
-
-            // Source file
-            args.push_back(wsourceFile);
-
-            // Profile
-            args.push_back(L"-T");
-            args.push_back(AnsiToWide(taskData.profile + "_" + taskData.shaderModel));
-
-            // Entry point
-            args.push_back(L"-E");
-            args.push_back(AnsiToWide(taskData.entryPoint));
-
-            // Defines
-            for (const string& define : g_Options.defines)
-            {
-                args.push_back(L"-D");
-                args.push_back(AnsiToWide(define));
-            }
-            for (const string& define : taskData.defines)
-            {
-                args.push_back(L"-D");
-                args.push_back(AnsiToWide(define));
-            }
-
-            // Include directories
-            for (const fs::path& path : g_Options.includeDirs)
-            {
-                args.push_back(L"-I");
-                args.push_back(path.wstring());
-            }
-
-            // Args
-            args.push_back(optimizationLevelRemap[taskData.optimizationLevel]);
-
-            uint32_t shaderModelIndex = (taskData.shaderModel[0] - '0') * 10 + (taskData.shaderModel[2] - '0');
-            if (shaderModelIndex >= 62)
-                args.push_back(L"-enable-16bit-types");
-
-            if (g_Options.warningsAreErrors)
-                args.push_back(DXC_ARG_WARNINGS_ARE_ERRORS);
-
-            if (g_Options.allResourcesBound)
-                args.push_back(DXC_ARG_ALL_RESOURCES_BOUND);
-
-            if (g_Options.matrixRowMajor)
-                args.push_back(DXC_ARG_PACK_MATRIX_ROW_MAJOR);
-
-            if (g_Options.hlsl2021)
-            {
-                args.push_back(L"-HV");
-                args.push_back(L"2021");
-            }
-
-            if (g_Options.pdb||g_Options.embedPdb)
-            {
-                // TODO: for SPIRV PDB can only be embedded, GetOutput(DXC_OUT_PDB) silently fails...
-                args.push_back(L"-Zi");
-                args.push_back(L"-Zsb"); // only binary code affects hash
-            }
-            
-            if (g_Options.embedPdb)
-                args.push_back(L"-Qembed_debug");
-
-            if (g_Options.platform == SPIRV)
-            {
-                args.push_back(L"-spirv");
-                args.push_back(wstring(L"-fspv-target-env=vulkan") + AnsiToWide(g_Options.vulkanVersion));
-
-                if (g_Options.vulkanMemoryLayout)
-                    args.push_back(wstring(L"-fvk-use-") + AnsiToWide(g_Options.vulkanMemoryLayout) + wstring(L"-layout"));
-
-                for (const string& ext : g_Options.spirvExtensions)
-                    args.push_back(wstring(L"-fspv-extension=") + AnsiToWide(ext));
-
-                for (const wstring& arg : regShifts)
-                    args.push_back(arg);
-            }
-            else // Not supported by SPIRV gen
-            {
-                if (g_Options.stripReflection)
-                    args.push_back(L"-Qstrip_reflect");
-            }
-
-            for (string const& options : g_Options.compilerOptions)
-            {
-                TokenizeCompilerOptions(options.c_str(), args);
-            }
-
-            // Debug output
-            if (g_Options.verbose)
-            {
-                wstringstream cmd;
-                for (const wstring& arg : args)
-                {
-                    cmd << arg;
-                    cmd << L" ";
-                }
-
-                Printf(WHITE "%ls\n", cmd.str().c_str());
-            }
-
-            // Now that args are finalized, get their C-string pointers into a vector
-            vector<const wchar_t*> argPointers;
-            argPointers.reserve(args.size());
-            for (const wstring& arg : args)
-                argPointers.push_back(arg.c_str());
-
-            // Compiling the shader
-            DxcBuffer sourceBuffer = {};
-            sourceBuffer.Ptr = sourceBlob->GetBufferPointer();
-            sourceBuffer.Size = sourceBlob->GetBufferSize();
-
-            ComPtr<IDxcIncludeHandler> pDefaultIncludeHandler;
-            dxcUtils->CreateDefaultIncludeHandler(&pDefaultIncludeHandler);
-
-            ComPtr<IDxcResult> dxcResult;
-            hr = dxcCompiler->Compile(&sourceBuffer, argPointers.data(), (uint32_t)args.size(), pDefaultIncludeHandler.Get(), IID_PPV_ARGS(&dxcResult));
-
-            if (SUCCEEDED(hr))
-                dxcResult->GetStatus(&hr);
-
-            if (dxcResult)
-            {
-                dxcResult->GetResult(&codeBlob);
-                dxcResult->GetErrorBuffer(&errorBlob);
-            }
-
-            isSucceeded = SUCCEEDED(hr) && codeBlob;
-
-            // Dump PDB
-            if (isSucceeded && g_Options.pdb)
-            {
-                ComPtr<IDxcBlob> pdb;
-                ComPtr<IDxcBlobUtf16> pdbName;
-                if (SUCCEEDED(dxcResult->GetOutput(DXC_OUT_PDB, IID_PPV_ARGS(&pdb), &pdbName)))
-                {
-                    wstring file = fs::path(taskData.outputFileWithoutExt).parent_path().wstring() + L"/" + _L(PDB_DIR) + L"/" + wstring(pdbName->GetStringPointer());
-                    FILE* fp = _wfopen(file.c_str(), L"wb");
-                    if (fp)
-                    {
-                        fwrite(pdb->GetBufferPointer(), pdb->GetBufferSize(), 1, fp);
-                        fclose(fp);
-                    }
-                }
-            }
-        }
-
-        if (g_Terminate)
-            break;
-
-        // Dump output
-        if (isSucceeded)
-            DumpShader(taskData, (uint8_t*)codeBlob->GetBufferPointer(), codeBlob->GetBufferSize());
-
-        // Update progress
-        UpdateProgress(taskData, isSucceeded, false, errorBlob ? (char*)errorBlob->GetBufferPointer() : nullptr);
     }
 }
 
@@ -2122,17 +1849,14 @@ int32_t main(int32_t argc, const char** argv)
 
     // Set envvar
     char envBuf[1024];
-    if (!g_Options.useAPI)
-    {
-        #ifdef _WIN32 // workaround for Windows
-            snprintf(envBuf, sizeof(envBuf), "COMPILER=\"%s\"", g_Options.compiler);
-        #else
-            snprintf(envBuf, sizeof(envBuf), "COMPILER=%s", g_Options.compiler);
-        #endif
+    #ifdef _WIN32 // workaround for Windows
+        snprintf(envBuf, sizeof(envBuf), "COMPILER=\"%s\"", g_Options.compiler);
+    #else
+        snprintf(envBuf, sizeof(envBuf), "COMPILER=%s", g_Options.compiler);
+    #endif
 
-        if (putenv(envBuf) != 0)
-            return 1;
-    }
+    if (putenv(envBuf) != 0)
+        return 1;
 
 #ifdef _WIN32
     // Setup a directory where to look for the compiler first
@@ -2145,10 +1869,6 @@ int32_t main(int32_t argc, const char** argv)
         char const* dllName = nullptr;
         switch (g_Options.platform)
         {
-        case DXIL:
-        case SPIRV:
-            dllName = "dxcompiler.dll";
-            break;
         case DXBC:
             dllName = "d3dcompiler_47.dll";
             break;
@@ -2242,14 +1962,12 @@ int32_t main(int32_t argc, const char** argv)
         vector<thread> threads(threadsNum);
         for (uint32_t i = 0; i < threadsNum; i++)
         {
-            if (!g_Options.useAPI)
-                threads[i] = thread(ExeCompile);
 #ifdef WIN32
-            else if (g_Options.platform == DXBC)
+            if (g_Options.useAPI && g_Options.platform == DXBC)
                 threads[i] = thread(FxcCompile);
             else
-                threads[i] = thread(DxcCompile);
 #endif
+                threads[i] = thread(ExeCompile);
         }
 
         for (uint32_t i = 0; i < threadsNum; i++)
@@ -2262,8 +1980,8 @@ int32_t main(int32_t argc, const char** argv)
         // Dump shader blobs
         for (const auto& [blobName, blobEntries] : g_ShaderBlobs)
         {
-            // If a blob would contain one entry with no defines, just skip it:
-            // the individual file's output name is the same as the blob, and we're done here.
+            // If a blob contains one entry with no defines, just skip it.
+            // The individual file's output name is the same as the blob, and we're done here.
             if (blobEntries.size() == 1 && blobEntries[0].combinedDefines.empty())
                 continue;
 
