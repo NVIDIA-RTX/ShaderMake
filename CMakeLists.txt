@@ -20,10 +20,10 @@ else()
     set(SHADERMAKE_BIN_OUTPUT_PATH "${CMAKE_SOURCE_DIR}/bin" CACHE STRING "")
 endif()
 
-cmake_dependent_option(SHADERMAKE_FIND_FXC "Find FXC in Windows SDK and populate 'SHADERMAKE_FXC_PATH' (and 'FXC_PATH') variables" ON "WIN32" OFF)
-cmake_dependent_option(SHADERMAKE_FIND_DXC "Download DXC from GitHub and populate 'SHADERMAKE_DXC_PATH' (and 'DXC_PATH') variables" ON "NOT APPLE" OFF)
+cmake_dependent_option(SHADERMAKE_FIND_FXC "Find FXC in Windows SDK and populate 'SHADERMAKE_FXC_PATH' variable" ON "WIN32" OFF)
+cmake_dependent_option(SHADERMAKE_FIND_DXC "Download DXC from GitHub and populate 'SHADERMAKE_DXC_PATH' variable" ON "NOT APPLE" OFF)
 
-option(SHADERMAKE_FIND_DXC_SPIRV "Find DXC in Vulkan SDK and populate 'SHADERMAKE_DXC_SPIRV_PATH' (and 'DXC_SPIRV_PATH') variables" ON)
+option(SHADERMAKE_FIND_DXC_VK "Find DXC in Vulkan SDK and populate 'SHADERMAKE_DXC_VK_PATH' variable (silently set to 'SHADERMAKE_DXC_PATH' if Vulkan SDK is not found)" ON)
 option(SHADERMAKE_FIND_COMPILERS "Master switch" ON)
 
 set(SHADERMAKE_DXC_VERSION "v1.8.2502" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
@@ -87,17 +87,22 @@ if(SHADERMAKE_FIND_COMPILERS)
     endif()
 
     # DXC (Vulkan SDK)
-    if(SHADERMAKE_FIND_DXC_SPIRV)
+    if(SHADERMAKE_FIND_DXC_VK)
         if(WIN32)
-            find_program(SHADERMAKE_DXC_SPIRV_PATH "$ENV{VULKAN_SDK}/Bin/dxc")
+            find_program(SHADERMAKE_DXC_VK_PATH "$ENV{VULKAN_SDK}/Bin/dxc")
         else()
-            find_program(SHADERMAKE_DXC_SPIRV_PATH "dxc")
+            find_program(SHADERMAKE_DXC_VK_PATH "dxc")
         endif()
 
-        if(NOT SHADERMAKE_DXC_SPIRV_PATH)
-            message("ShaderMake: Vulkan SDK is not installed")
-            set(SHADERMAKE_DXC_SPIRV_PATH ${SHADERMAKE_DXC_PATH} CACHE INTERNAL "")
+        # Soft-fallback to a valid path
+        if(NOT SHADERMAKE_DXC_PATH AND SHADERMAKE_DXC_VK_PATH)
+            set(SHADERMAKE_DXC_PATH ${SHADERMAKE_DXC_VK_PATH} CACHE INTERNAL "")
         endif()
+    endif()
+
+    # Soft-fallback to a valid path
+    if(NOT SHADERMAKE_DXC_VK_PATH AND SHADERMAKE_DXC_PATH)
+        set(SHADERMAKE_DXC_VK_PATH ${SHADERMAKE_DXC_PATH} CACHE INTERNAL "")
     endif()
 
     # FXC (Windows SDK)
@@ -167,9 +172,4 @@ endif()
 # Done
 message("ShaderMake: SHADERMAKE_FXC_PATH = '${SHADERMAKE_FXC_PATH}'")
 message("ShaderMake: SHADERMAKE_DXC_PATH = '${SHADERMAKE_DXC_PATH}'")
-message("ShaderMake: SHADERMAKE_DXC_SPIRV_PATH = '${SHADERMAKE_DXC_SPIRV_PATH}'")
-
-# Compatibility names # TODO: remove
-set(FXC_PATH ${SHADERMAKE_FXC_PATH} CACHE INTERNAL "")
-set(DXC_PATH ${SHADERMAKE_DXC_PATH} CACHE INTERNAL "")
-set(DXC_SPIRV_PATH ${SHADERMAKE_DXC_SPIRV_PATH} CACHE INTERNAL "")
+message("ShaderMake: SHADERMAKE_DXC_VK_PATH = '${SHADERMAKE_DXC_VK_PATH}'")

@@ -12,9 +12,9 @@ Features:
 
 During project deployment, the *CMake* script automatically downloads/searches for `fxc` and `dxc` and sets these variables:
 
-- `SHADERMAKE_FXC_PATH` (and `FXC_PATH`) - path to `fxc` from *Windows SDK*
-- `SHADERMAKE_DXC_PATH` (and `SHADERMAKE_DXC_PATH`) - path to `dxc` from *GitHub*
-- `SHADERMAKE_DXC_SPIRV_PATH` (and `SHADERMAKE_DXC_SPIRV_PATH`) - path to `dxc` from *Vulkan SDK* (with soft fallback to `dxc` from GitHub if requested but *Vulkan SDK* is not found)
+- `SHADERMAKE_FXC_PATH` - path to `fxc` from *Windows SDK*
+- `SHADERMAKE_DXC_PATH` - path to `dxc` downloaded from *GitHub*
+- `SHADERMAKE_DXC_VK_PATH` - path to `dxc` from *Vulkan SDK* (with soft fallback to `dxc` from GitHub if requested but *Vulkan SDK* is not found)
 
 ## Command line options
 
