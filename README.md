@@ -13,7 +13,7 @@ Features:
 *CMake* options:
 
 - `SHADERMAKE_FIND_FXC` - find *FXC* in installed [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/) and populate `SHADERMAKE_FXC_PATH`
-- `SHADERMAKE_FIND_DXC` -  download [DXC]((https://github.com/microsoft/DirectXShaderCompiler)) from *GitHub* and populate `SHADERMAKE_DXC_PATH`
+- `SHADERMAKE_FIND_DXC` -  download [DXC](https://github.com/microsoft/DirectXShaderCompiler) from *GitHub* and populate `SHADERMAKE_DXC_PATH`
 - `SHADERMAKE_FIND_DXC_VK` - find *DXC* in installed [Vulkan SDK](https://www.lunarg.com/vulkan-sdk/) and populate `SHADERMAKE_DXC_VK_PATH` (this is the only way to get *DXC* on *MacOS* currently)
 - `SHADERMAKE_FIND_SLANG` - download [Slang](https://github.com/shader-slang/slang) from *GitHub* and populate `SHADERMAKE_SLANG_PATH`
 - `SHADERMAKE_FIND_COMPILERS` - master switch
