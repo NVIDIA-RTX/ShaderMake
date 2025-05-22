@@ -23,11 +23,13 @@ endif()
 cmake_dependent_option(SHADERMAKE_FIND_FXC "Find FXC in Windows SDK and populate 'SHADERMAKE_FXC_PATH' variable" ON "WIN32" OFF)
 cmake_dependent_option(SHADERMAKE_FIND_DXC "Download DXC from GitHub and populate 'SHADERMAKE_DXC_PATH' variable" ON "NOT APPLE" OFF)
 
-option(SHADERMAKE_FIND_DXC_VK "Find DXC in Vulkan SDK and populate 'SHADERMAKE_DXC_VK_PATH' variable (silently set to 'SHADERMAKE_DXC_PATH' if Vulkan SDK is not found)" ON)
+option(SHADERMAKE_FIND_DXC_VK "Find DXC in Vulkan SDK and populate 'SHADERMAKE_DXC_VK_PATH' variable" ON)
+option(SHADERMAKE_FIND_SLANG "Download Slang from GitHub and populate 'SHADERMAKE_SLANG_PATH' variable" OFF)
 option(SHADERMAKE_FIND_COMPILERS "Master switch" ON)
 
 set(SHADERMAKE_DXC_VERSION "v1.8.2502" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
 set(SHADERMAKE_DXC_DATE "2025_02_20" CACHE STRING "DXC release date") # DXC releases on GitHub have this in download links :(
+set(SHADERMAKE_SLANG_VERSION "2025.9.1" CACHE STRING "Slang to download from 'GitHub/Shader-slang' releases")
 
 # Globals?
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
@@ -48,9 +50,9 @@ else()
 endif()
 
 if((CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64") OR(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64"))
-    set(WINDOWS_SYSTEM "arm64")
+    set(WINDOWS_ARCH "arm64")
 else()
-    set(WINDOWS_SYSTEM "x64")
+    set(WINDOWS_ARCH "x64")
 endif()
 
 # Find compilers
@@ -58,32 +60,65 @@ if(SHADERMAKE_FIND_COMPILERS)
     # DXC (GitHub)
     if(SHADERMAKE_FIND_DXC)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-            # Linux
-            FetchContent_Declare(
-                dxc
-                DOWNLOAD_EXTRACT_TIMESTAMP 1
-                DOWNLOAD_NO_PROGRESS 1
-                URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/${SHADERMAKE_DXC_VERSION}/linux_dxc_${SHADERMAKE_DXC_DATE}.x86_64.tar.gz
-            )
-
-            FetchContent_MakeAvailable(dxc)
-
-            set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/dxc" CACHE INTERNAL "")
+            set(DXC_SUBSTRING "linux_dxc_${SHADERMAKE_DXC_DATE}.x86_64.tar.gz")
         else()
-            # Windows, ARM
-            FetchContent_Declare(
-                dxc
-                DOWNLOAD_EXTRACT_TIMESTAMP 1
-                DOWNLOAD_NO_PROGRESS 1
-                URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/${SHADERMAKE_DXC_VERSION}/dxc_${SHADERMAKE_DXC_DATE}.zip
-            )
-
-            FetchContent_MakeAvailable(dxc)
-
-            set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/${WINDOWS_SYSTEM}/dxc.exe" CACHE INTERNAL "")
+            set(DXC_SUBSTRING "dxc_${SHADERMAKE_DXC_DATE}.zip")
         endif()
 
-        message("ShaderMake: downloading dxc ${SHADERMAKE_DXC_VERSION}...")
+        set(DXC_DOWNLOAD_LINK https://github.com/microsoft/DirectXShaderCompiler/releases/download/${SHADERMAKE_DXC_VERSION}/${DXC_SUBSTRING})
+
+        FetchContent_Declare(
+            dxc
+            DOWNLOAD_EXTRACT_TIMESTAMP 1
+            DOWNLOAD_NO_PROGRESS 1
+            URL ${DXC_DOWNLOAD_LINK}
+        )
+
+        message("ShaderMake: downloading DXC ${SHADERMAKE_DXC_VERSION}...")
+
+        FetchContent_MakeAvailable(dxc)
+
+        if(WIN32)
+            set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/${WINDOWS_ARCH}/dxc.exe" CACHE INTERNAL "")
+        else()
+            set(SHADERMAKE_DXC_PATH "${dxc_SOURCE_DIR}/bin/dxc" CACHE INTERNAL "")
+        endif()
+    endif()
+
+    # Slang (GitHub)
+    if(SHADERMAKE_FIND_SLANG)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            set(SLANG_SUBSTRING "-linux")
+        elseif(APPLE)
+            set(SLANG_SUBSTRING "-macos")
+        else()
+            set(SLANG_SUBSTRING "-windows")
+        endif()
+
+        if((CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64") OR(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64"))
+            set(SLANG_SUBSTRING "${SLANG_SUBSTRING}-aarch64")
+        else()
+            set(SLANG_SUBSTRING "${SLANG_SUBSTRING}-x86_64")
+        endif()
+
+        set(SLANG_DOWNLOAD_LINK https://github.com/shader-slang/slang/releases/download/v${SHADERMAKE_SLANG_VERSION}/slang-${SHADERMAKE_SLANG_VERSION}${SLANG_SUBSTRING}.zip)
+
+        FetchContent_Declare(
+            slang
+            DOWNLOAD_EXTRACT_TIMESTAMP 1
+            DOWNLOAD_NO_PROGRESS 1
+            URL ${SLANG_DOWNLOAD_LINK}
+        )
+
+        message("ShaderMake: downloading Slang ${SHADERMAKE_SLANG_VERSION}...")
+
+        FetchContent_MakeAvailable(slang)
+
+        if(WIN32)
+            set(SHADERMAKE_SLANG_PATH "${slang_SOURCE_DIR}/bin/slangc.exe" CACHE INTERNAL "")
+        else()
+            set(SHADERMAKE_SLANG_PATH "${slang_SOURCE_DIR}/bin/slangc" CACHE INTERNAL "")
+        endif()
     endif()
 
     # DXC (Vulkan SDK)
@@ -116,7 +151,7 @@ if(SHADERMAKE_FIND_COMPILERS)
         endif()
 
         get_filename_component(WINDOWS_SDK_ROOT "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]" ABSOLUTE)
-        set(WINDOWS_SDK_BIN "${WINDOWS_SDK_ROOT}/bin/${WINDOWS_SDK_VERSION}/${WINDOWS_SYSTEM}")
+        set(WINDOWS_SDK_BIN "${WINDOWS_SDK_ROOT}/bin/${WINDOWS_SDK_VERSION}/${WINDOWS_ARCH}")
 
         find_program(SHADERMAKE_FXC_PATH "${WINDOWS_SDK_BIN}/fxc")
     endif()
@@ -173,3 +208,4 @@ endif()
 message("ShaderMake: SHADERMAKE_FXC_PATH = '${SHADERMAKE_FXC_PATH}'")
 message("ShaderMake: SHADERMAKE_DXC_PATH = '${SHADERMAKE_DXC_PATH}'")
 message("ShaderMake: SHADERMAKE_DXC_VK_PATH = '${SHADERMAKE_DXC_VK_PATH}'")
+message("ShaderMake: SHADERMAKE_SLANG_PATH = '${SHADERMAKE_SLANG_PATH}'")
