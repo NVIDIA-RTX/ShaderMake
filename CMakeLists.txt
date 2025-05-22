@@ -25,7 +25,7 @@ cmake_dependent_option(SHADERMAKE_FIND_DXC "Download DXC from GitHub and populat
 
 option(SHADERMAKE_FIND_DXC_VK "Find DXC in Vulkan SDK and populate 'SHADERMAKE_DXC_VK_PATH' variable" ON)
 option(SHADERMAKE_FIND_SLANG "Download Slang from GitHub and populate 'SHADERMAKE_SLANG_PATH' variable" OFF)
-option(SHADERMAKE_FIND_COMPILERS "Master switch" ON)
+option(SHADERMAKE_FIND_COMPILERS "Master switch" ${SHADERMAKE_IS_SUBMODULE})
 
 set(SHADERMAKE_DXC_VERSION "v1.8.2502" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
 set(SHADERMAKE_DXC_DATE "2025_02_20" CACHE STRING "DXC release date") # DXC releases on GitHub have this in download links :(
