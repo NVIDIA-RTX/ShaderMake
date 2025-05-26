@@ -65,6 +65,7 @@ Defines & include directories:
 
 Other options:
 - `-f, --force` - Treat all source files as modified
+- `--project` (string) - project name to be seen in informational output
 - `--sourceDir` (string) - Source code directory
 - `--relaxedInclude` (string) - Include file(s) not invoking re-compilation
 - `--outputExt` (string) - Extension for output files, default is one of `.dxbc`, `.dxil`, `.spirv`

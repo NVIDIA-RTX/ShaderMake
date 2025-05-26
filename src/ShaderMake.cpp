@@ -86,6 +86,7 @@ struct Options
     vector<string> compilerOptions;
     fs::path configFile;
     fs::path sourceDir;
+    const char* projectName = "";
     const char* platformName = nullptr;
     const char* outputDir = nullptr;
     const char* shaderModel = "6_5";
@@ -484,8 +485,8 @@ void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool willRetry, 
 
         if (message)
         {
-            Printf(YELLOW "[%5.1f%%] %s %s {%s} {%s}\n%s",
-                progress, g_Options.platformName,
+            Printf(YELLOW "%s(%5.1f%%) %s %s {%s} {%s}\n%s",
+                g_Options.projectName, progress, g_Options.platformName,
                 taskData.source.c_str(),
                 taskData.entryPoint.c_str(),
                 taskData.combinedDefines.c_str(),
@@ -493,8 +494,8 @@ void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool willRetry, 
         }
         else
         {
-            Printf(GREEN "[%5.1f%%]" GRAY " %s" WHITE " %s" GRAY " {%s}" WHITE " {%s}\n",
-                progress, g_Options.platformName,
+            Printf(GREEN "%s(%5.1f%%)" GRAY " %s" WHITE " %s" GRAY " {%s}" WHITE " {%s}\n",
+                g_Options.projectName, progress, g_Options.platformName,
                 taskData.source.c_str(),
                 taskData.entryPoint.c_str(),
                 taskData.combinedDefines.c_str());
@@ -505,8 +506,8 @@ void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool willRetry, 
         // If retrying, requeue the task and try again without counting failure or terminating
         if (willRetry)
         {
-            Printf(YELLOW "[ RETRY-QUEUED ] %s %s {%s} {%s}\n",
-                g_Options.platformName,
+            Printf(YELLOW "%s( RETRY-QUEUED ) %s %s {%s} {%s}\n",
+                g_Options.projectName, g_Options.platformName,
                 taskData.source.c_str(),
                 taskData.entryPoint.c_str(),
                 taskData.combinedDefines.c_str());
@@ -518,8 +519,8 @@ void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool willRetry, 
         }
         else
         {
-            Printf(RED "[ FAIL ] %s %s {%s} {%s}\n%s",
-                   g_Options.platformName,
+            Printf(RED "%s( FAIL ) %s %s {%s} {%s}\n%s",
+                   g_Options.projectName, g_Options.platformName,
                    taskData.source.c_str(),
                    taskData.entryPoint.c_str(),
                    taskData.combinedDefines.c_str(),
@@ -624,6 +625,7 @@ bool Options::Parse(int32_t argc, const char** argv)
             OPT_STRING('D', "define", &unused, "Macro definition(s) in forms 'M=value' or 'M'", AddGlobalDefine, (intptr_t)this, 0),
         OPT_GROUP("Other options:"),
             OPT_BOOLEAN('f', "force", &force, "Treat all source files as modified", nullptr, 0, 0),
+            OPT_STRING(0, "project", &projectName, "Project name to be seen in informational output", nullptr, 0, 0),
             OPT_STRING(0, "sourceDir", &srcDir, "Source code directory", nullptr, 0, 0),
             OPT_STRING(0, "relaxedInclude", &unused, "Include file(s) not invoking re-compilation", AddRelaxedInclude, (intptr_t)this, 0),
             OPT_STRING(0, "outputExt", &outputExt, "Extension for output files, default is one of .dxbc, .dxil, .spirv", nullptr, 0, 0),
@@ -1843,7 +1845,6 @@ int32_t main(int32_t argc, const char** argv)
 #endif
 
     // Parse command line
-    const char* self = argv[0];
     if (!g_Options.Parse(argc, argv))
         return 1;
 
@@ -1889,7 +1890,6 @@ int32_t main(int32_t argc, const char** argv)
 
     { // Gather shader permutations
         fs::file_time_type configTime = fs::last_write_time(g_Options.configFile);
-        configTime = max(configTime, fs::last_write_time(self));
 
         ifstream configStream(g_Options.configFile);
 
@@ -2036,8 +2036,6 @@ int32_t main(int32_t argc, const char** argv)
         uint64_t end = Timer_GetTicks();
         Printf(WHITE "Elapsed time %.2f ms\n", Timer_ConvertTicksToMilliseconds(end - start));
     }
-    else
-        Printf(WHITE "All %s shaders are up to date.\n", g_Options.platformName);
 
     return (g_Terminate || g_FailedTaskCount) ? 1 : 0;
 }
