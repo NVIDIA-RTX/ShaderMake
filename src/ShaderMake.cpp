@@ -41,10 +41,7 @@ THE SOFTWARE.
 #include <system_error>
 
 #ifdef _WIN32
-    #include <d3dcompiler.h> // FXC
-
-    #include <wrl/client.h>
-    using Microsoft::WRL::ComPtr;
+    #include <windows.h>
 #else
     #include <unistd.h>
     #include <limits.h>
@@ -61,6 +58,8 @@ namespace fs = filesystem;
 #define USE_GLOBAL_OPTIMIZATION_LEVEL 0xFF
 #define SPIRV_SPACES_NUM 8
 #define PDB_DIR "PDB"
+#define BUF_SIZE 2048 // max line length
+#define DEVMODE 0 // 1 forces recompilation if EXE changes
 
 #ifdef _MSC_VER
     #define popen _popen
@@ -99,6 +98,7 @@ struct Options
     uint32_t bRegShift = 300;
     uint32_t uRegShift = 400;
     uint32_t optimizationLevel = 3;
+    int32_t retryCount = 10; // default 10 retries for compilation task sub-process failures
     Platform platform = DXBC;
     bool serial = false;
     bool flatten = false;
@@ -118,11 +118,10 @@ struct Options
     bool hlsl2021 = false;
     bool verbose = false;
     bool colorize = false;
-    bool useAPI = false;
     bool slang = false;
     bool slangHlsl = false;
     bool noRegShifts = false;
-    int retryCount = 10; // default 10 retries for compilation task sub-process failures
+    bool compactProgress = false;
 
     bool Parse(int32_t argc, const char** argv);
 
@@ -169,7 +168,8 @@ map<string, vector<BlobEntry>> g_ShaderBlobs;
 vector<TaskData> g_TaskData;
 mutex g_TaskMutex;
 atomic<uint32_t> g_ProcessedTaskCount;
-atomic<int> g_TaskRetryCount;
+atomic<uint32_t> g_PrevProgress;
+atomic<int32_t> g_TaskRetryCount;
 atomic<bool> g_Terminate = false;
 atomic<uint32_t> g_FailedTaskCount = 0;
 uint32_t g_OriginalTaskCount;
@@ -336,7 +336,7 @@ void Printf(const char* format, ...)
     va_start(argptr, format);
 
     // Remove embedded colors if colorization is off
-    char fixedFormat[1024]; // TODO: let's assume that we always fit
+    char fixedFormat[BUF_SIZE]; // TODO: let's assume that we always fit
     if (!g_Options.colorize)
     {
         const char* in = format;
@@ -483,10 +483,10 @@ void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool willRetry, 
     {
         float progress = 100.0f * float(++g_ProcessedTaskCount) / float(g_OriginalTaskCount);
 
-        if (message)
+        if (message && *message != '\0')
         {
-            Printf(YELLOW "%s(%5.1f%%) %s %s {%s} {%s}\n%s",
-                g_Options.projectName, progress, g_Options.platformName,
+            Printf(YELLOW "(%5.1f%%) %s %s %s {%s} {%s}\n%s",
+                progress, g_Options.projectName, g_Options.platformName,
                 taskData.source.c_str(),
                 taskData.entryPoint.c_str(),
                 taskData.combinedDefines.c_str(),
@@ -494,11 +494,23 @@ void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool willRetry, 
         }
         else
         {
-            Printf(GREEN "%s(%5.1f%%)" GRAY " %s" WHITE " %s" GRAY " {%s}" WHITE " {%s}\n",
-                g_Options.projectName, progress, g_Options.platformName,
-                taskData.source.c_str(),
-                taskData.entryPoint.c_str(),
-                taskData.combinedDefines.c_str());
+            if (g_Options.compactProgress)
+            {
+                uint32_t progressSnapped = (uint32_t(progress + 0.5f) / 10) * 10;
+                if (progressSnapped != g_PrevProgress)
+                {
+                    Printf(GREEN "(%3u%%)" GRAY " %s %s\n", progressSnapped, g_Options.projectName, g_Options.platformName);
+                    g_PrevProgress = progressSnapped;
+                }
+            }
+            else
+            {
+                Printf(GREEN "(%5.1f%%)" GRAY " %s %s" WHITE " %s" GRAY " {%s}" WHITE " {%s}\n",
+                    progress, g_Options.projectName, g_Options.platformName,
+                    taskData.source.c_str(),
+                    taskData.entryPoint.c_str(),
+                    taskData.combinedDefines.c_str());
+            }
         }
     }
     else
@@ -506,7 +518,7 @@ void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool willRetry, 
         // If retrying, requeue the task and try again without counting failure or terminating
         if (willRetry)
         {
-            Printf(YELLOW "%s( RETRY-QUEUED ) %s %s {%s} {%s}\n",
+            Printf(YELLOW "( RETRY-QUEUED ) %s %s %s {%s} {%s}\n",
                 g_Options.projectName, g_Options.platformName,
                 taskData.source.c_str(),
                 taskData.entryPoint.c_str(),
@@ -519,16 +531,16 @@ void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool willRetry, 
         }
         else
         {
-            Printf(RED "%s( FAIL ) %s %s {%s} {%s}\n%s",
+            Printf(RED "( FAIL ) %s %s %s {%s} {%s}\n%s",
                    g_Options.projectName, g_Options.platformName,
                    taskData.source.c_str(),
                    taskData.entryPoint.c_str(),
                    taskData.combinedDefines.c_str(),
                    message ? message : "<no message text>!\n");
-            
+
             if (!g_Options.continueOnError)
                 g_Terminate = true;
-            
+
             ++g_FailedTaskCount;
         }
     }
@@ -574,19 +586,19 @@ uint64_t Timer_GetTicks()
 // OPTIONS
 //=====================================================================================================================
 
-int AddInclude(struct argparse* self, const struct argparse_option* option)
+int32_t AddInclude(struct argparse* self, const struct argparse_option* option)
 { ((Options*)(option->data))->includeDirs.push_back(*(const char**)option->value); UNUSED(self); return 0; }
 
-int AddGlobalDefine(struct argparse* self, const struct argparse_option* option)
+int32_t AddGlobalDefine(struct argparse* self, const struct argparse_option* option)
 { ((Options*)(option->data))->defines.push_back(*(const char**)option->value); UNUSED(self); return 0; }
 
-int AddRelaxedInclude(struct argparse* self, const struct argparse_option* option)
+int32_t AddRelaxedInclude(struct argparse* self, const struct argparse_option* option)
 { ((Options*)(option->data))->relaxedIncludes.push_back(*(const char**)option->value); UNUSED(self); return 0; }
 
-int AddSpirvExtension(struct argparse* self, const struct argparse_option* option)
+int32_t AddSpirvExtension(struct argparse* self, const struct argparse_option* option)
 { ((Options*)(option->data))->spirvExtensions.push_back(*(const char**)option->value); UNUSED(self); return 0; }
 
-int AddCompilerOptions(struct argparse* self, const struct argparse_option* option)
+int32_t AddCompilerOptions(struct argparse* self, const struct argparse_option* option)
 { ((Options*)(option->data))->compilerOptions.push_back(*(const char**)option->value); UNUSED(self); return 0; }
 
 bool Options::Parse(int32_t argc, const char** argv)
@@ -632,11 +644,11 @@ bool Options::Parse(int32_t argc, const char** argv)
             OPT_BOOLEAN(0, "serial", &serial, "Disable multi-threading", nullptr, 0, 0),
             OPT_BOOLEAN(0, "flatten", &flatten, "Flatten source directory structure in the output directory", nullptr, 0, 0),
             OPT_BOOLEAN(0, "continue", &continueOnError, "Continue compilation if an error is occured", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "useAPI", &useAPI, "Use FXC (d3dcompiler) API explicitly", nullptr, 0, 0),
             OPT_BOOLEAN(0, "colorize", &colorize, "Colorize console output", nullptr, 0, 0),
             OPT_BOOLEAN(0, "verbose", &verbose, "Print commands before they are executed", nullptr, 0, 0),
             OPT_INTEGER(0, "retryCount", &retryCount, "Retry count for compilation task sub-process failures", nullptr, 0, 0),
             OPT_BOOLEAN(0, "ignoreConfigDir", &ignoreConfigDir, "Use 'current dir' instead of 'config dir' as parent path for relative dirs", nullptr, 0, 0),
+            OPT_BOOLEAN(0, "compactProgress", &compactProgress, "Compact compilation progress reporting", nullptr, 0, 0),
         OPT_GROUP("SPIRV options:"),
             OPT_STRING(0, "vulkanMemoryLayout", &vulkanMemoryLayout, "Maps to '-fvk-use-<VALUE>-layout' DXC options: dx, gl, scalar", nullptr, 0, 0),
             OPT_STRING(0, "vulkanVersion", &vulkanVersion, "Vulkan environment version, maps to '-fspv-target-env' (default = 1.3)", nullptr, 0, 0),
@@ -660,7 +672,7 @@ bool Options::Parse(int32_t argc, const char** argv)
     argparse_init(&argparse, options, usages, 0);
     argparse_describe(&argparse, nullptr, "\nMulti-threaded shader compiling & processing tool");
     argparse_parse(&argparse, argc, argv);
-    
+
     if (!config)
     {
         Printf(RED "ERROR: Config file not specified!\n");
@@ -701,7 +713,7 @@ bool Options::Parse(int32_t argc, const char** argv)
         Printf(RED "ERROR: Compiler '%s' does not exist!\n", compiler);
         return false;
     }
-    
+
     if (strlen(shaderModel) != 3 || strstr(shaderModel, "."))
     {
         Printf(RED "ERROR: Shader model ('%s') must have format 'X_Y'!\n", shaderModel);
@@ -735,12 +747,12 @@ bool Options::Parse(int32_t argc, const char** argv)
         return false;
     }
 
-    if (g_Options.vulkanMemoryLayout && 
+    if (g_Options.vulkanMemoryLayout &&
         strcmp(g_Options.vulkanMemoryLayout, "dx") != 0 &&
-        strcmp(g_Options.vulkanMemoryLayout, "gl") != 0 && 
+        strcmp(g_Options.vulkanMemoryLayout, "gl") != 0 &&
         strcmp(g_Options.vulkanMemoryLayout, "scalar") != 0)
     {
-        if (g_Options.slang && (strcmp(g_Options.vulkanMemoryLayout, "dx") == 0)) 
+        if (g_Options.slang && (strcmp(g_Options.vulkanMemoryLayout, "dx") == 0))
         {
             Printf(RED "ERROR: Unsupported value '%s' for --vulkanMemoryLayout! Only 'gl' and 'scalar' are supported for Slang.\n",
                 g_Options.vulkanMemoryLayout);
@@ -749,12 +761,6 @@ bool Options::Parse(int32_t argc, const char** argv)
             Printf(RED "ERROR: Unsupported value '%s' for --vulkanMemoryLayout! Only 'dx', 'gl' and 'scalar' are supported.\n",
                 g_Options.vulkanMemoryLayout);
         }
-        return false;
-    }
-
-    if (!g_Options.compilerOptions.empty() && g_Options.useAPI && g_Options.platform == Platform::DXBC)
-    {
-        Printf(RED "ERROR: --compilerOptions is not compatible with '--platform DXBC --useAPI'!\n");
         return false;
     }
 
@@ -804,7 +810,7 @@ bool Options::Parse(int32_t argc, const char** argv)
     return true;
 }
 
-int AddLocalDefine(struct argparse* self, const struct argparse_option* option)
+int32_t AddLocalDefine(struct argparse* self, const struct argparse_option* option)
 { ((ConfigLine*)(option->data))->defines.push_back(*(const char**)option->value); UNUSED(self); return 0; }
 
 bool ConfigLine::Parse(int32_t argc, const char** argv)
@@ -857,270 +863,6 @@ bool ConfigLine::Parse(int32_t argc, const char** argv)
 
     return true;
 }
-
-//=====================================================================================================================
-// FXC API
-//=====================================================================================================================
-#ifdef _WIN32
-
-void TokenizeDefineStrings(vector<string>& in, vector<D3D_SHADER_MACRO>& out)
-{
-    if (in.empty())
-        return;
-
-    out.reserve(out.size() + in.size());
-    for (const string& defineString : in)
-    {
-        D3D_SHADER_MACRO& define = out.emplace_back();
-        char* s = (char*)defineString.c_str(); // IMPORTANT: "defineString" gets split into tokens divided by '\0'
-        define.Name = strtok(s, "=");
-        define.Definition = strtok(nullptr, "=");
-    }
-}
-
-// Parses a string with command line options into a vector of wstring, one wstring per option.
-// Options are separated by spaces and may be quoted with "double quotes".
-// Backslash (\) means the next character is inserted literally into the output.
-void TokenizeCompilerOptions(const char* in, vector<wstring>& out)
-{
-    wstring current;
-    bool quotes = false;
-    bool escape = false;
-    const char* ptr = in;
-    while (char ch = *ptr++)
-    {
-        if (escape)
-        {
-            current.push_back(wchar_t(ch));
-            escape = false;
-            continue;
-        }
-
-        if (ch == ' ' && !quotes)
-        {
-            if (!current.empty())
-                out.push_back(current);
-            current.clear();
-        }
-        else if (ch == '\\')
-        {
-            escape = true;
-        }
-        else if (ch == '"')
-        {
-            quotes = !quotes;
-        }
-        else
-        {
-            current.push_back(wchar_t(ch));
-        }
-    }
-
-    if (!current.empty())
-        out.push_back(current);
-}
-
-class FxcIncluder : public ID3DInclude
-{
-public:
-    FxcIncluder(const fs::path& sourceFile)
-    {
-        includeDirs.reserve(g_Options.includeDirs.size() + 8);
-
-        includeDirs.push_back(sourceFile.parent_path());
-        for (const fs::path& path : g_Options.includeDirs)
-            includeDirs.push_back(path);
-    }
-
-    ~FxcIncluder()
-    {}
-
-    STDMETHOD(Open)(THIS_ D3D_INCLUDE_TYPE includeType, LPCSTR pFileName, LPCVOID pParentData, LPCVOID *ppData, UINT *pBytes)
-    {
-        // TODO: an error in an include file gets reported using relative path with recent WinSDKs, what makes it 
-        // "unclickable" from the Visual Studio output window. It doesn't look like an issue of "FxcIncluder",
-        // because the issue is here even with "D3D_COMPILE_STANDARD_FILE_INCLUDE", but "FXC.exe" works fine.
-
-        UNUSED(includeType);
-        UNUSED(pParentData);
-
-        *ppData = 0;
-        *pBytes = 0;
-
-        // Find file
-        fs::path name = fs::path(pFileName);
-        fs::path file = name;
-        if (file.is_relative())
-        {
-            for (const fs::path& path : includeDirs)
-            {
-                file = path / name;
-                if (fs::exists(file))
-                    break;
-            }
-        }
-
-        // Open file
-        FILE* stream = fopen(file.string().c_str(), "rb");
-        if (!stream)
-            return E_FAIL;
-
-        // Load file
-        uint32_t len = GetFileLength(stream);
-        char* buf = (char*)malloc(len);
-        if (!buf)
-            return E_FAIL;
-
-        fread(buf, 1, len, stream);
-        fclose(stream);
-
-        *ppData = buf;
-        *pBytes = len;
-
-        // Add the path to this file to the current include stack so that any sub-includes would be relative to this path
-        includeDirs.push_back(file.parent_path());
-
-        return S_OK;
-    }
-
-    STDMETHOD(Close)(THIS_ LPCVOID pData)
-    {
-        if (pData)
-        {
-            // Pop the path for the innermost included file from the include stack
-            includeDirs.pop_back();
-
-            // Release the data
-            free((void*)pData);
-        }
-
-        return S_OK;
-    }
-
-private:
-    vector<fs::path> includeDirs;
-};
-
-void FxcCompile()
-{
-    static const uint32_t optimizationLevelRemap[] = {
-        D3DCOMPILE_SKIP_OPTIMIZATION,
-        D3DCOMPILE_OPTIMIZATION_LEVEL1,
-        D3DCOMPILE_OPTIMIZATION_LEVEL2,
-        D3DCOMPILE_OPTIMIZATION_LEVEL3,
-    };
-
-    vector<D3D_SHADER_MACRO> optionsDefines;
-    vector<string> tokenizedDefines = g_Options.defines;
-    TokenizeDefineStrings(tokenizedDefines, optionsDefines);
-
-    while (!g_Terminate)
-    {
-        // Getting a task in the current thread
-        TaskData taskData;
-        {
-            lock_guard<mutex> guard(g_TaskMutex);
-            if (g_TaskData.empty())
-                return;
-
-            taskData = g_TaskData.back();
-            g_TaskData.pop_back();
-        }
-
-        // Tokenize DXBC defines
-        vector<D3D_SHADER_MACRO> defines = optionsDefines;
-        TokenizeDefineStrings(taskData.defines, defines);
-        defines.push_back({nullptr, nullptr});
-
-        // Args
-        uint32_t compilerFlags = (g_Options.pdb ? (D3DCOMPILE_DEBUG | D3DCOMPILE_DEBUG_NAME_FOR_BINARY) : 0) |
-            (g_Options.allResourcesBound ? D3DCOMPILE_ALL_RESOURCES_BOUND : 0) |
-            (g_Options.warningsAreErrors ? D3DCOMPILE_WARNINGS_ARE_ERRORS : 0) |
-            (g_Options.matrixRowMajor ? D3DCOMPILE_PACK_MATRIX_ROW_MAJOR : 0) |
-            optimizationLevelRemap[taskData.optimizationLevel];
-
-        // Compiling the shader
-        fs::path sourceFile = g_Options.sourceDir / taskData.source;
-
-        FxcIncluder fxcIncluder(sourceFile);
-        string profile = taskData.profile + "_5_0";
-
-        ComPtr<ID3DBlob> codeBlob;
-        ComPtr<ID3DBlob> errorBlob;
-        HRESULT hr = D3DCompileFromFile(
-            sourceFile.wstring().c_str(),
-            defines.data(),
-            &fxcIncluder,
-            taskData.entryPoint.c_str(),
-            profile.c_str(),
-            compilerFlags, 0,
-            &codeBlob,
-            &errorBlob);
-
-        bool isSucceeded = SUCCEEDED(hr) && codeBlob;
-
-        if (g_Terminate)
-            break;
-
-        // Dump PDB
-        if (isSucceeded && g_Options.pdb)
-        {
-            // Retrieve the debug info part of the shader
-            ComPtr<ID3DBlob> pdb;
-            D3DGetBlobPart(codeBlob->GetBufferPointer(), codeBlob->GetBufferSize(), D3D_BLOB_PDB, 0, &pdb);
-
-            // Retrieve the suggested name for the debug data file
-            ComPtr<ID3DBlob> pdbName;
-            D3DGetBlobPart(codeBlob->GetBufferPointer(), codeBlob->GetBufferSize(), D3D_BLOB_DEBUG_NAME, 0, &pdbName);
-
-            // This struct represents the first four bytes of the name blob
-            struct ShaderDebugName
-            {
-                uint16_t Flags;       // Reserved, must be set to zero
-                uint16_t NameLength;  // Length of the debug name, without null terminator
-                                      // Followed by NameLength bytes of the UTF-8-encoded name
-                                      // Followed by a null terminator
-                                      // Followed by [0-3] zero bytes to align to a 4-byte boundary
-            };
-
-            auto pDebugNameData = (const ShaderDebugName*)(pdbName->GetBufferPointer());
-            auto pName = (const char*)(pDebugNameData + 1);
-
-            string file = fs::path(taskData.outputFileWithoutExt).parent_path().string() + "/" + PDB_DIR + "/" + pName;
-            FILE* fp = fopen(file.c_str(), "wb");
-            if (fp)
-            {
-                fwrite(pdb->GetBufferPointer(), pdb->GetBufferSize(), 1, fp);
-                fclose(fp);
-            }
-        }
-
-        // Strip reflection
-        ComPtr<ID3DBlob> strippedBlob;
-        if (g_Options.stripReflection && isSucceeded)
-        {
-            D3DStripShader(codeBlob->GetBufferPointer(), codeBlob->GetBufferSize(), D3DCOMPILER_STRIP_REFLECTION_DATA | D3DCOMPILER_STRIP_DEBUG_INFO, &strippedBlob);
-            codeBlob = strippedBlob;
-        }
-
-        // Dump output
-        if (isSucceeded)
-            DumpShader(taskData, (uint8_t*)codeBlob->GetBufferPointer(), codeBlob->GetBufferSize());
-
-        // Update progress
-        UpdateProgress(taskData, isSucceeded, false, errorBlob ? (char*)errorBlob->GetBufferPointer() : nullptr);
-
-        // Terminate if this shader failed and "--continue" is not set
-        if (g_Terminate)
-            break;
-    }
-}
-
-#endif
-
-//=====================================================================================================================
-// EXE
-//=====================================================================================================================
 
 bool ReadBinaryFile(const char* file, vector<uint8_t>& outData)
 {
@@ -1196,8 +938,9 @@ void ExeCompile()
                 // Slang defaults to slang language mode unless -lang <other language> sets something else.
                 // For HLSL compatibility mode:
                 //    - use -lang hlsl to set language mode to HLSL
-                //    - use -unscoped-enums so Slang doesn't require all enums to be scoped                
-                if (g_Options.slangHlsl) {              
+                //    - use -unscoped-enums so Slang doesn't require all enums to be scoped
+                if (g_Options.slangHlsl)
+                {
                     // Language mode: hlsl
                     cmd << " -lang hlsl";
 
@@ -1207,7 +950,7 @@ void ExeCompile()
 
                 // Profile
                 cmd << " -profile " << taskData.profile << "_" << taskData.shaderModel;
-                
+
                 // Target/platform
                 cmd << " -target " << g_PlatformSlangTargets[g_Options.platform];
 
@@ -1215,7 +958,8 @@ void ExeCompile()
                 cmd << " -o " << EscapePath(outputFile);
 
                 // Entry point
-                if (taskData.profile != "lib") {
+                if (taskData.profile != "lib")
+                {
                     // Don't specify entry if profile is lib_*, Slang will use the entry point currently
                     cmd << " -entry " << taskData.entryPoint;
                 }
@@ -1250,13 +994,13 @@ void ExeCompile()
                     cmd << " -fvk-use-entrypoint-name";
 
                     if (g_Options.vulkanMemoryLayout)
-                    {   
+                    {
                         if (strcmp(g_Options.vulkanMemoryLayout, "scalar") == 0)
                             cmd << " -force-glsl-scalar-layout";
                         else if (strcmp(g_Options.vulkanMemoryLayout, "gl") == 0)
                             cmd << " -fvk-use-gl-layout";
                     }
-                    
+
                     if (!g_Options.noRegShifts)
                     {
                         for (uint32_t space = 0; space < SPIRV_SPACES_NUM; space++)
@@ -1270,7 +1014,7 @@ void ExeCompile()
                 }
 
                 // Custom options
-                for (string const& options : g_Options.compilerOptions)
+                for (const string& options : g_Options.compilerOptions)
                     cmd << " " << options;
             }
             else
@@ -1371,7 +1115,7 @@ void ExeCompile()
                 }
 
                 // Custom options
-                for (string const& options : g_Options.compilerOptions)
+                for (const string& options : g_Options.compilerOptions)
                     cmd << " " << options;
             }
 
@@ -1390,26 +1134,27 @@ void ExeCompile()
         ostringstream msg;
         FILE* pipe = popen(cmd.str().c_str(), "r");
 
-        bool isSucceeded = false, willRetry = false;
+        bool isSucceeded = false;
+        bool willRetry = false;
         if (pipe)
         {
-            char buf[1024];
+            char buf[BUF_SIZE];
             while (fgets(buf, sizeof(buf), pipe))
             {
-                // Ignore useless unmutable FXC message
-                if (strstr(buf, "compilation object save succeeded"))
+                // Ignore useless unmutable FXC messages: "compilation header/object save succeeded"
+                if (g_Options.platform == DXBC && !strncmp(buf, "compilation ", 12))
                     continue;
 
                 msg << buf;
             }
 
-            const int result = pclose(pipe);
+            int32_t result = pclose(pipe);
             // Check status, see https://pubs.opengroup.org/onlinepubs/009696699/functions/pclose.html
-            const bool childProcessError = (result == -1 && errno == ECHILD);
-#ifdef WIN32
-            const bool commandShellError = false;
+            bool childProcessError = (result == -1 && errno == ECHILD);
+#ifdef _WIN32
+            bool commandShellError = false;
 #else
-            const bool commandShellError = (WIFEXITED(result) && WEXITSTATUS(result) == 127);
+            bool commandShellError = (WIFEXITED(result) && WEXITSTATUS(result) == 127);
 #endif
 
             if (result == 0)
@@ -1419,7 +1164,7 @@ void ExeCompile()
             else if (g_TaskRetryCount > 0 && (childProcessError || commandShellError))
                 willRetry = true;
         }
-        
+
         // Slang cannot produce .h files directly, so we convert its binary output to .h here if needed
         if (isSucceeded && convertBinaryOutputToHeader)
         {
@@ -1803,7 +1548,7 @@ bool CreateBlob(const string& blobName, const vector<BlobEntry>& entries, bool u
         }
         else
             success = false;
-        
+
         if (!success)
             break;
     }
@@ -1845,51 +1590,32 @@ int32_t main(int32_t argc, const char** argv)
 #endif
 
     // Parse command line
+#if DEVMODE
+    const char* self = argv[0];
+#endif
     if (!g_Options.Parse(argc, argv))
         return 1;
 
     // Set envvar
-    char envBuf[1024];
-    #ifdef _WIN32 // workaround for Windows
-        snprintf(envBuf, sizeof(envBuf), "COMPILER=\"%s\"", g_Options.compiler);
-    #else
-        snprintf(envBuf, sizeof(envBuf), "COMPILER=%s", g_Options.compiler);
-    #endif
+    char envBuf[BUF_SIZE];
+#ifdef _WIN32 // workaround for Windows
+    snprintf(envBuf, sizeof(envBuf), "COMPILER=\"%s\"", g_Options.compiler);
+
+    // Setup a directory where to look for the compiler first
+    fs::path compilerPath = fs::path(g_Options.compiler).parent_path();
+    SetDllDirectoryA(compilerPath.string().c_str());
+#else
+    snprintf(envBuf, sizeof(envBuf), "COMPILER=%s", g_Options.compiler);
+#endif
 
     if (putenv(envBuf) != 0)
         return 1;
 
-#ifdef _WIN32
-    // Setup a directory where to look for the compiler first
-    fs::path compilerPath = fs::path(g_Options.compiler).parent_path();
-    SetDllDirectoryA(compilerPath.string().c_str());
-    // This will still leave the launch folder as the first entry in the search path, so
-    // try to explicitly load the appropriate DLL from the correct path
-    if (g_Options.useAPI)
-    {
-        char const* dllName = nullptr;
-        switch (g_Options.platform)
-        {
-        case DXBC:
-            dllName = "d3dcompiler_47.dll";
-            break;
-        default:
-            break;
-        }
-        if (dllName != nullptr)
-        {
-            fs::path dllPath = compilerPath / dllName;
-            if (LoadLibraryA(dllPath.string().c_str()) == NULL)
-            {
-                Printf(RED "ERROR: Failed to load compiler dll: \"%s\"!\n", dllPath.string().c_str());
-                return 1;
-            }
-        }
-    }
-#endif
-
     { // Gather shader permutations
         fs::file_time_type configTime = fs::last_write_time(g_Options.configFile);
+#if DEVMODE
+        configTime = max(configTime, fs::last_write_time(self));
+#endif
 
         ifstream configStream(g_Options.configFile);
 
@@ -1948,7 +1674,7 @@ int32_t main(int32_t argc, const char** argv)
     // Process tasks
     if (!g_TaskData.empty())
     {
-        Printf(WHITE "Using compiler: %s\n", g_Options.compiler);
+        Printf(WHITE "Compiling shaders using: %s\n", g_Options.compiler);
 
         g_OriginalTaskCount = (uint32_t)g_TaskData.size();
         g_ProcessedTaskCount = 0;
@@ -1961,14 +1687,7 @@ int32_t main(int32_t argc, const char** argv)
 
         vector<thread> threads(threadsNum);
         for (uint32_t i = 0; i < threadsNum; i++)
-        {
-#ifdef WIN32
-            if (g_Options.useAPI && g_Options.platform == DXBC)
-                threads[i] = thread(FxcCompile);
-            else
-#endif
-                threads[i] = thread(ExeCompile);
-        }
+            threads[i] = thread(ExeCompile);
 
         for (uint32_t i = 0; i < threadsNum; i++)
             threads[i].join();
@@ -1994,8 +1713,7 @@ int32_t main(int32_t argc, const char** argv)
                 if (entry.combinedDefines.empty())
                 {
                     const string blobBaseName = fs::path(blobName).stem().generic_string();
-                    Printf(RED "ERROR: Cannot create a blob for shader %s where some permutation(s) have no definitions!",
-                        blobBaseName.c_str());
+                    Printf(RED "ERROR: Cannot create a blob for shader %s where some permutation(s) have no definitions!", blobBaseName.c_str());
                     invalidEntry = true;
                     break;
                 }
@@ -2028,13 +1746,13 @@ int32_t main(int32_t argc, const char** argv)
         }
 
         // Report failed tasks
-        if (g_FailedTaskCount)
-            Printf(YELLOW "WARNING: %u task(s) failed to complete!\n", g_FailedTaskCount.load());
-        else
-            Printf(WHITE "%d task(s) completed successfully.\n", g_OriginalTaskCount);
-
         uint64_t end = Timer_GetTicks();
-        Printf(WHITE "Elapsed time %.2f ms\n", Timer_ConvertTicksToMilliseconds(end - start));
+        double ms = Timer_ConvertTicksToMilliseconds(end - start);
+
+        if (g_FailedTaskCount)
+            Printf(YELLOW "WARNING: %u task(s) failed to complete (elapsed time %.2f ms)\n", g_FailedTaskCount.load(), ms);
+        else
+            Printf(WHITE "%u task(s) completed successfully (elapsed time %.2f ms)\n", g_OriginalTaskCount, ms);
     }
 
     return (g_Terminate || g_FailedTaskCount) ? 1 : 0;

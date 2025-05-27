@@ -65,18 +65,17 @@ Defines & include directories:
 
 Other options:
 - `-f, --force` - Treat all source files as modified
-- `--project` (string) - project name to be seen in informational output
 - `--sourceDir` (string) - Source code directory
 - `--relaxedInclude` (string) - Include file(s) not invoking re-compilation
 - `--outputExt` (string) - Extension for output files, default is one of `.dxbc`, `.dxil`, `.spirv`
 - `--serial` - Disable multi-threading
 - `--flatten` - Flatten source directory structure in the output directory
 - `--continue` - Continue compilation if an error is occured
-- `--useAPI` - Use *FXC (d3dcompiler)* API explicitly (Windows only)
 - `--colorize` - Colorize console output
 - `--verbose` - Print commands before they are executed
 - `--retryCount` - Retry count for compilation task sub-process failures
 - `--ignoreConfigDir` - Use 'current dir' instead of 'config dir' as parent path for relative dirs
+- `--compactProgress` - Compact compilation progress reporting
 
 *SPIRV* options:
 - `--vulkanMemoryLayout` (string) - Maps to `-fvk-use-<VALUE>-layout` *DXC* options: dx, gl, scalar
