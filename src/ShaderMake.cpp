@@ -59,7 +59,7 @@ namespace fs = filesystem;
 #define SPIRV_SPACES_NUM 8
 #define PDB_DIR "PDB"
 #define BUF_SIZE 2048 // max line length
-#define DEVMODE 0 // 1 forces recompilation if EXE changes
+#define DEVMODE 1 // 1 forces recompilation if EXE changes
 
 #ifdef _MSC_VER
     #define popen _popen
