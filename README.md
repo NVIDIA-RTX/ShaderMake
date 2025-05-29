@@ -20,8 +20,9 @@ Features:
 - `SHADERMAKE_DXC_VERSION` - *DXC* to download from *GitHub/DirectXShaderCompiler* releases
 - `SHADERMAKE_DXC_DATE` - *DXC* release date (unfortunately present in the download links)
 - `SHADERMAKE_SLANG_VERSION` - *Slang* to download from *GitHub/Shader-slang/slang* releases
+- `SHADERMAKE_TOOL` - Use ShaderMake as an external tool and hide the executable from the parent project IDE. It's especially handy to avoid shader recompilation on switching build configurations
 
-If one of `SHADERMAKE_DXC_PATH` or `SHADERMAKE_DXC_VK_PATH` left empty during deployment, it will be set to the valid one (both support *DXIL* and *SPIRV* code generation).
+If one of `SHADERMAKE_DXC_PATH` or `SHADERMAKE_DXC_VK_PATH` left empty during deployment, it will be set to the valid one (both support *DXIL* and *SPIRV* code generation). After deployment `SHADERMAKE_PATH` CMake variable stores the path to the ShaderMake executable.
 
 ## Command line options
 
