@@ -167,11 +167,15 @@ set_target_properties(ShaderMakeBlob PROPERTIES FOLDER "ShaderMake" POSITION_IND
 
 # ShaderMake
 if(SHADERMAKE_TOOL)
+    if(NOT CMAKE_CONFIGURATION_TYPES)
+        set(ARGS "-DCMAKE_BUILD_TYPE=Release")
+    endif()
+
     ExternalProject_Add(
         ShaderMake
         SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ShaderMake"
         BINARY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/_Build"
-        CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release
+        CMAKE_ARGS "${ARGS}"
         BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target ShaderMake --config Release
         INSTALL_COMMAND ""
         STEP_TARGETS build
