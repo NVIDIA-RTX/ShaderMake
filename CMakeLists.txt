@@ -156,14 +156,14 @@ if(SHADERMAKE_FIND_COMPILERS)
     endif()
 endif()
 
-# ShaderBlob
-add_library(ShaderBlob STATIC
+# ShaderMakeBlob
+add_library(ShaderMakeBlob STATIC
     "ShaderMake/ShaderBlob.h"
     "ShaderMake/ShaderBlob.cpp"
 )
-target_include_directories(ShaderBlob PUBLIC "include")
-target_compile_options(ShaderBlob PRIVATE ${COMPILE_OPTIONS})
-set_target_properties(ShaderBlob PROPERTIES FOLDER "ShaderMake" POSITION_INDEPENDENT_CODE ON)
+target_include_directories(ShaderMakeBlob PUBLIC "")
+target_compile_options(ShaderMakeBlob PRIVATE ${COMPILE_OPTIONS})
+set_target_properties(ShaderMakeBlob PROPERTIES FOLDER "ShaderMake" POSITION_INDEPENDENT_CODE ON)
 
 # ShaderMake
 if(SHADERMAKE_TOOL)
@@ -190,8 +190,9 @@ else()
 endif()
 
 # Done
-message("ShaderMake: SHADERMAKE_PATH = '${SHADERMAKE_PATH}'")
-message("ShaderMake: SHADERMAKE_FXC_PATH = '${SHADERMAKE_FXC_PATH}'")
-message("ShaderMake: SHADERMAKE_DXC_PATH = '${SHADERMAKE_DXC_PATH}'")
-message("ShaderMake: SHADERMAKE_DXC_VK_PATH = '${SHADERMAKE_DXC_VK_PATH}'")
-message("ShaderMake: SHADERMAKE_SLANG_PATH = '${SHADERMAKE_SLANG_PATH}'")
+message("ShaderMake: paths:")
+message(STATUS "SHADERMAKE_PATH = '${SHADERMAKE_PATH}'")
+message(STATUS "SHADERMAKE_FXC_PATH = '${SHADERMAKE_FXC_PATH}'")
+message(STATUS "SHADERMAKE_DXC_PATH = '${SHADERMAKE_DXC_PATH}'")
+message(STATUS "SHADERMAKE_DXC_VK_PATH = '${SHADERMAKE_DXC_VK_PATH}'")
+message(STATUS "SHADERMAKE_SLANG_PATH = '${SHADERMAKE_SLANG_PATH}'")
