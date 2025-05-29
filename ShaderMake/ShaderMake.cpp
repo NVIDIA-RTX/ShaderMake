@@ -21,7 +21,7 @@ THE SOFTWARE.
 */
 
 #include "argparse.h"
-#include <ShaderMake/ShaderBlob.h>
+#include "ShaderBlob.h"
 
 #include <sstream>
 #include <fstream>
