@@ -22,13 +22,17 @@ endif()
 
 # ShaderMake
 add_executable(${PROJECT_NAME}
-    "argparse.c"
     "argparse.h"
+    "argparse.c"
     "ShaderBlob.h"
     "ShaderBlob.cpp"
     "ShaderMake.cpp"
 )
 target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_OPTIONS})
+
+if(SHADERMAKE_BIN_OUTPUT_PATH)
+    set_target_properties(${PROJECT_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${SHADERMAKE_BIN_OUTPUT_PATH}/$<CONFIG>")
+endif()
 
 set_property(TARGET ${PROJECT_NAME} PROPERTY FOLDER "ShaderMake")
 

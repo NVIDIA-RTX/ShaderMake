@@ -14,9 +14,11 @@ else()
 endif()
 
 # Cached
-if(NOT IS_SUBMODULE)
+if(IS_SUBMODULE)
+    set(SHADERMAKE_BIN_OUTPUT_PATH "" CACHE STRING "")
+else()
     set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "")
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/_Bin" CACHE STRING "")
+    set(SHADERMAKE_BIN_OUTPUT_PATH "${CMAKE_SOURCE_DIR}/bin" CACHE STRING "")
 endif()
 
 cmake_dependent_option(SHADERMAKE_FIND_FXC "Find FXC in Windows SDK and populate 'SHADERMAKE_FXC_PATH' variable" ON "WIN32" OFF)
@@ -25,7 +27,7 @@ cmake_dependent_option(SHADERMAKE_FIND_DXC "Download DXC from GitHub and populat
 option(SHADERMAKE_FIND_DXC_VK "Find DXC in Vulkan SDK and populate 'SHADERMAKE_DXC_VK_PATH' variable" ON)
 option(SHADERMAKE_FIND_SLANG "Download Slang from GitHub and populate 'SHADERMAKE_SLANG_PATH' variable" OFF)
 option(SHADERMAKE_FIND_COMPILERS "Master switch" ${IS_SUBMODULE})
-option(SHADERMAKE_TOOL "Use ShaderMake as an external tool and hide the executable from the parent project IDE" ${IS_SUBMODULE})
+option(SHADERMAKE_TOOL "Use ShaderMake as an external tool and hide the executable from the parent project IDE" OFF)
 
 set(SHADERMAKE_DXC_VERSION "v1.8.2502" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
 set(SHADERMAKE_DXC_DATE "2025_02_20" CACHE STRING "DXC release date") # DXC releases on GitHub have this in download links :(
@@ -174,7 +176,7 @@ if(SHADERMAKE_TOOL)
     ExternalProject_Add(
         ShaderMake
         SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ShaderMake"
-        BINARY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/_Build"
+        BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}"
         CMAKE_ARGS "${ARGS}"
         BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target ShaderMake --config Release
         INSTALL_COMMAND ""
@@ -183,9 +185,9 @@ if(SHADERMAKE_TOOL)
     )
 
     if(CMAKE_CONFIGURATION_TYPES)
-        set(SHADERMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/_Build/Release/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
+        set(SHADERMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/Release/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
     else()
-        set(SHADERMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/_Build/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
+        set(SHADERMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
     endif()
 else()
     add_subdirectory(ShaderMake)
