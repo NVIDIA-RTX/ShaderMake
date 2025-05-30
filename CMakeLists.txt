@@ -75,7 +75,7 @@ if(SHADERMAKE_FIND_COMPILERS)
             URL ${DXC_DOWNLOAD_LINK}
         )
 
-        message("ShaderMake: downloading DXC ${SHADERMAKE_DXC_VERSION}...")
+        message(STATUS "ShaderMake: downloading DXC ${SHADERMAKE_DXC_VERSION}...")
 
         FetchContent_MakeAvailable(dxc)
 
@@ -111,7 +111,7 @@ if(SHADERMAKE_FIND_COMPILERS)
             URL ${SLANG_DOWNLOAD_LINK}
         )
 
-        message("ShaderMake: downloading Slang ${SHADERMAKE_SLANG_VERSION}...")
+        message(STATUS "ShaderMake: downloading Slang ${SHADERMAKE_SLANG_VERSION}...")
 
         FetchContent_MakeAvailable(slang)
 
@@ -173,22 +173,23 @@ if(SHADERMAKE_TOOL)
         set(ARGS "-DCMAKE_BUILD_TYPE=Release")
     endif()
 
+    if(CMAKE_CONFIGURATION_TYPES)
+        set(SHADERMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/build/Release/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
+    else()
+        set(SHADERMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/build/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
+    endif()
+
     ExternalProject_Add(
         ShaderMake
         SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ShaderMake"
-        BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}"
+        BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/build"
         CMAKE_ARGS "${ARGS}"
         BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target ShaderMake --config Release
+        BUILD_BYPRODUCTS ${SHADERMAKE_PATH}
         INSTALL_COMMAND ""
         STEP_TARGETS build
         COMMENT "Building ShaderMake (tool)..."
     )
-
-    if(CMAKE_CONFIGURATION_TYPES)
-        set(SHADERMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/Release/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
-    else()
-        set(SHADERMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
-    endif()
 else()
     add_subdirectory(ShaderMake)
 
@@ -196,7 +197,6 @@ else()
 endif()
 
 # Done
-message("ShaderMake: paths:")
 message(STATUS "SHADERMAKE_PATH = '${SHADERMAKE_PATH}'")
 message(STATUS "SHADERMAKE_FXC_PATH = '${SHADERMAKE_FXC_PATH}'")
 message(STATUS "SHADERMAKE_DXC_PATH = '${SHADERMAKE_DXC_PATH}'")
