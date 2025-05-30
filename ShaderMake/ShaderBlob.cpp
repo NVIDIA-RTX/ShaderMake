@@ -20,7 +20,7 @@
 * DEALINGS IN THE SOFTWARE.
 */
 
-#include <ShaderMake/ShaderBlob.h>
+#include "ShaderBlob.h"
 
 #include <sstream>
 #include <cstring>

@@ -1,19 +1,20 @@
 cmake_minimum_required(VERSION 3.15)
 
 include(FetchContent)
+include(ExternalProject)
 include(CMakeDependentOption)
 
-project(ShaderMake LANGUAGES C CXX)
+project(ShaderMakeAll LANGUAGES C CXX)
 
 # Is submodule?
 if(${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_SOURCE_DIR})
-    set(SHADERMAKE_IS_SUBMODULE OFF)
+    set(IS_SUBMODULE OFF)
 else()
-    set(SHADERMAKE_IS_SUBMODULE ON)
+    set(IS_SUBMODULE ON)
 endif()
 
 # Cached
-if(SHADERMAKE_IS_SUBMODULE)
+if(IS_SUBMODULE)
     set(SHADERMAKE_BIN_OUTPUT_PATH "" CACHE STRING "")
 else()
     set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "")
@@ -25,7 +26,8 @@ cmake_dependent_option(SHADERMAKE_FIND_DXC "Download DXC from GitHub and populat
 
 option(SHADERMAKE_FIND_DXC_VK "Find DXC in Vulkan SDK and populate 'SHADERMAKE_DXC_VK_PATH' variable" ON)
 option(SHADERMAKE_FIND_SLANG "Download Slang from GitHub and populate 'SHADERMAKE_SLANG_PATH' variable" OFF)
-option(SHADERMAKE_FIND_COMPILERS "Master switch" ${SHADERMAKE_IS_SUBMODULE})
+option(SHADERMAKE_FIND_COMPILERS "Master switch" ${IS_SUBMODULE})
+option(SHADERMAKE_TOOL "Use ShaderMake as an external tool and hide the executable from the parent project IDE" OFF)
 
 set(SHADERMAKE_DXC_VERSION "v1.8.2502" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
 set(SHADERMAKE_DXC_DATE "2025_02_20" CACHE STRING "DXC release date") # DXC releases on GitHub have this in download links :(
@@ -36,7 +38,6 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_C_STANDARD 99)
 
 # Compile options
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -74,7 +75,7 @@ if(SHADERMAKE_FIND_COMPILERS)
             URL ${DXC_DOWNLOAD_LINK}
         )
 
-        message("ShaderMake: downloading DXC ${SHADERMAKE_DXC_VERSION}...")
+        message(STATUS "ShaderMake: downloading DXC ${SHADERMAKE_DXC_VERSION}...")
 
         FetchContent_MakeAvailable(dxc)
 
@@ -110,7 +111,7 @@ if(SHADERMAKE_FIND_COMPILERS)
             URL ${SLANG_DOWNLOAD_LINK}
         )
 
-        message("ShaderMake: downloading Slang ${SHADERMAKE_SLANG_VERSION}...")
+        message(STATUS "ShaderMake: downloading Slang ${SHADERMAKE_SLANG_VERSION}...")
 
         FetchContent_MakeAvailable(slang)
 
@@ -159,53 +160,45 @@ endif()
 
 # ShaderMakeBlob
 add_library(ShaderMakeBlob STATIC
-    "include/ShaderMake/ShaderBlob.h"
-    "src/ShaderBlob.cpp"
+    "ShaderMake/ShaderBlob.h"
+    "ShaderMake/ShaderBlob.cpp"
 )
-target_include_directories(ShaderMakeBlob PUBLIC "include")
+target_include_directories(ShaderMakeBlob PUBLIC "")
 target_compile_options(ShaderMakeBlob PRIVATE ${COMPILE_OPTIONS})
-set_target_properties(ShaderMakeBlob PROPERTIES
-    FOLDER ShaderMake
-    POSITION_INDEPENDENT_CODE ON
-)
+set_target_properties(ShaderMakeBlob PROPERTIES FOLDER "ShaderMake" POSITION_INDEPENDENT_CODE ON)
 
 # ShaderMake
-add_executable(ShaderMake
-    "src/argparse.c"
-    "src/argparse.h"
-    "src/ShaderMake.cpp"
-)
-target_compile_options(ShaderMake PRIVATE ${COMPILE_OPTIONS})
+if(SHADERMAKE_TOOL)
+    if(NOT CMAKE_CONFIGURATION_TYPES)
+        set(ARGS "-DCMAKE_BUILD_TYPE=Release")
+    endif()
 
-if(SHADERMAKE_BIN_OUTPUT_PATH)
-    set_target_properties(ShaderMake PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${SHADERMAKE_BIN_OUTPUT_PATH}/$<CONFIG>"
-        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${SHADERMAKE_BIN_OUTPUT_PATH}/Debug"
-        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${SHADERMAKE_BIN_OUTPUT_PATH}/MinSizeRel"
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${SHADERMAKE_BIN_OUTPUT_PATH}/Release"
-        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${SHADERMAKE_BIN_OUTPUT_PATH}/RelWithDebInfo"
+    if(CMAKE_CONFIGURATION_TYPES)
+        set(SHADERMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/build/Release/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
+    else()
+        set(SHADERMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/build/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
+    endif()
+
+    ExternalProject_Add(
+        ShaderMake
+        SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ShaderMake"
+        BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/build"
+        CMAKE_ARGS "${ARGS}"
+        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target ShaderMake --config Release
+        BUILD_BYPRODUCTS ${SHADERMAKE_PATH}
+        INSTALL_COMMAND ""
+        STEP_TARGETS build
+        COMMENT "Building ShaderMake (tool)..."
     )
-endif()
-
-set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ShaderMake)
-set_property(TARGET ShaderMake PROPERTY FOLDER ShaderMake)
-target_link_libraries(ShaderMake ShaderMakeBlob)
-
-if(WIN32)
-    target_compile_definitions(ShaderMake PRIVATE
-        WIN32_LEAN_AND_MEAN
-        NOMINMAX
-        _CRT_SECURE_NO_WARNINGS
-    )
-    target_link_libraries(ShaderMake d3dcompiler)
-elseif(APPLE)
-    target_link_libraries(ShaderMake pthread)
 else()
-    target_link_libraries(ShaderMake stdc++fs pthread)
+    add_subdirectory(ShaderMake)
+
+    set(SHADERMAKE_PATH "ShaderMake" CACHE INTERNAL "")
 endif()
 
 # Done
-message("ShaderMake: SHADERMAKE_FXC_PATH = '${SHADERMAKE_FXC_PATH}'")
-message("ShaderMake: SHADERMAKE_DXC_PATH = '${SHADERMAKE_DXC_PATH}'")
-message("ShaderMake: SHADERMAKE_DXC_VK_PATH = '${SHADERMAKE_DXC_VK_PATH}'")
-message("ShaderMake: SHADERMAKE_SLANG_PATH = '${SHADERMAKE_SLANG_PATH}'")
+message(STATUS "SHADERMAKE_PATH = '${SHADERMAKE_PATH}'")
+message(STATUS "SHADERMAKE_FXC_PATH = '${SHADERMAKE_FXC_PATH}'")
+message(STATUS "SHADERMAKE_DXC_PATH = '${SHADERMAKE_DXC_PATH}'")
+message(STATUS "SHADERMAKE_DXC_VK_PATH = '${SHADERMAKE_DXC_VK_PATH}'")
+message(STATUS "SHADERMAKE_SLANG_PATH = '${SHADERMAKE_SLANG_PATH}'")
