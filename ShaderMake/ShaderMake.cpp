@@ -132,6 +132,8 @@ struct Options
 struct ConfigLine
 {
     vector<string> defines;
+    vector<string> compilerOptionsDXIL;
+    vector<string> compilerOptionsSPIRV;
     const char* source = nullptr;
     const char* entryPoint = "main";
     const char* profile = nullptr;
@@ -147,6 +149,8 @@ struct ConfigLine
 struct TaskData
 {
     vector<string> defines;
+    vector<string> compilerOptionsDXIL;
+    vector<string> compilerOptionsSPIRV;
     string source;
     string entryPoint;
     string profile;
@@ -813,6 +817,12 @@ bool Options::Parse(int32_t argc, const char** argv)
 int32_t AddLocalDefine(struct argparse* self, const struct argparse_option* option)
 { ((ConfigLine*)(option->data))->defines.push_back(*(const char**)option->value); UNUSED(self); return 0; }
 
+int32_t AddCompilerOptionsDXIL(struct argparse* self, const struct argparse_option* option)
+{ ((ConfigLine*)(option->data))->compilerOptionsDXIL.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+
+int32_t AddCompilerOptionsSPIRV(struct argparse* self, const struct argparse_option* option)
+{ ((ConfigLine*)(option->data))->compilerOptionsSPIRV.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+
 bool ConfigLine::Parse(int32_t argc, const char** argv)
 {
     source = argv[0];
@@ -826,6 +836,9 @@ bool ConfigLine::Parse(int32_t argc, const char** argv)
         OPT_INTEGER('O', "optimization", &optimizationLevel, "(Optional) optimization level", nullptr, 0, 0),
         OPT_STRING('s', "outputSuffix", &outputSuffix, "(Optional) suffix to add before extension after filename", nullptr, 0, 0),
         OPT_STRING('m', "shaderModel", &shaderModel, "(Optional) shader model for DXIL/SPIRV (always SM 5.0 for DXBC) in 'X_Y' format", nullptr, 0, 0),
+
+        OPT_STRING(0, "compilerOptionsDXIL", &unused, "Custom command line options for dxil, separated by spaces", AddCompilerOptionsDXIL, (intptr_t)this, 0),
+        OPT_STRING(0, "compilerOptionsSPIRV", &unused, "Custom command line options for spirv, separated by spaces", AddCompilerOptionsSPIRV, (intptr_t)this, 0),
         OPT_END(),
     };
 
@@ -1016,6 +1029,18 @@ void ExeCompile()
                 // Custom options
                 for (const string& options : g_Options.compilerOptions)
                     cmd << " " << options;
+
+                // Platform-specific custom options
+                if (g_Options.platform == DXIL)
+                {
+                    for (const string& options : taskData.compilerOptionsDXIL)
+                        cmd << " " << options;
+                }
+                else if (g_Options.platform == SPIRV)
+                {
+                    for (const string& options : taskData.compilerOptionsSPIRV)
+                        cmd << " " << options;
+                }
             }
             else
             {
@@ -1117,6 +1142,18 @@ void ExeCompile()
                 // Custom options
                 for (const string& options : g_Options.compilerOptions)
                     cmd << " " << options;
+
+                // Platform-specific custom options
+                if (g_Options.platform == DXIL)
+                {
+                    for (const string& options : taskData.compilerOptionsDXIL)
+                        cmd << " " << options;
+                }
+                else if (g_Options.platform == SPIRV)
+                {
+                    for (const string& options : taskData.compilerOptionsSPIRV)
+                        cmd << " " << options;
+                }
             }
 
             // Source file
@@ -1324,7 +1361,7 @@ bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::file_ti
         shaderName = shaderName.filename();
     if (strcmp(configLine.entryPoint, "main"))
         shaderName += "_" + string(configLine.entryPoint);
-    if(configLine.outputSuffix)
+    if (configLine.outputSuffix)
         shaderName += string(configLine.outputSuffix);
 
     // Compiled permutation name
@@ -1445,6 +1482,8 @@ bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::file_ti
     taskData.combinedDefines = combinedDefines;
     taskData.outputFileWithoutExt = outputFileWithoutExt;
     taskData.defines = configLine.defines;
+    taskData.compilerOptionsDXIL = configLine.compilerOptionsDXIL;
+    taskData.compilerOptionsSPIRV = configLine.compilerOptionsSPIRV;
     taskData.optimizationLevel = optimizationLevel;
 
     // Gather blobs
