@@ -2,12 +2,12 @@
 
 [![Build Status](https://github.com/NVIDIA-RTX/ShaderMake/actions/workflows/build.yml/badge.svg)](https://github.com/NVIDIA-RTX/ShaderMake/actions/workflows/build.yml)
 
-ShaderMake is a frond-end tool for batch multi-threaded shader compilation developed by NVIDIA DevTech. It is compatible with Microsoft *FXC* and *DXC* compilers by calling them via API functions or executing them through command line, and with [Slang](https://github.com/shader-slang/slang) through command line only.
+ShaderMake is a front-end tool for batch multi-threaded shader compilation developed by NVIDIA DevTech. It is compatible with Microsoft *FXC* and *DXC* compilers by calling them via API functions or executing them through command line, and with [Slang](https://github.com/shader-slang/slang) through command line only.
 
 Features:
 
 - Generates *DXBC*, *DXIL* *SPIRV* and any produced by *Slang*;
-- Output formats: a native binary, a header file, and a binary or header [blob](#user-content-shader-blob) (containing all permutations for a givan input shader file);
+- Output formats: a native binary, a header file, and a binary or header [blob](#user-content-shader-blob) (containing all permutations for a given input shader file);
 - Minimizes the number of re-compilation tasks by tracking file modification times and include trees.
 
 *CMake* options:
@@ -71,7 +71,7 @@ Other options:
 - `--outputExt` (string) - Extension for output files, default is one of `.dxbc`, `.dxil`, `.spirv`
 - `--serial` - Disable multi-threading
 - `--flatten` - Flatten source directory structure in the output directory
-- `--continue` - Continue compilation if an error is occured
+- `--continue` - Continue compilation if an error occurred
 - `--colorize` - Colorize console output
 - `--verbose` - Print commands before they are executed
 - `--retryCount` - Retry count for compilation task sub-process failures
