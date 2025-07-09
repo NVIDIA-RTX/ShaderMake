@@ -170,10 +170,6 @@ if(SHADERMAKE_FIND_COMPILERS)
             HINTS ${WINDOWS_SDK_BIN}
             REQUIRED
         )
-
-        if(SHADERMAKE_FXC_PATH)
-            message(STATUS "ShaderMake: found FXC at ${SHADERMAKE_FXC_PATH}")
-        endif()
     endif()
 endif()
 
