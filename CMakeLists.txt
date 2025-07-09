@@ -150,9 +150,6 @@ if(SHADERMAKE_FIND_COMPILERS)
             string(REGEX REPLACE "\\\\$" "" WINDOWS_SDK_VERSION "$ENV{WindowsSDKLibVersion}")
         else()
             set(WINDOWS_SDK_VERSION ${CMAKE_SYSTEM_VERSION})
-            if("${WINDOWS_SDK_VERSION}" STREQUAL "")
-                message(FATAL_ERROR "ShaderMake: failed to detect WindowsSDK version!")
-            endif()
         endif()
 
         # Find Windows SDK root
