@@ -142,19 +142,41 @@ if(SHADERMAKE_FIND_COMPILERS)
     endif()
 
     # FXC (Windows SDK)
-    if(SHADERMAKE_FIND_FXC)
+    if(SHADERMAKE_FIND_FXC)        
+        # Find Windows SDK version
         if(DEFINED CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
             set(WINDOWS_SDK_VERSION ${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION})
         elseif(DEFINED ENV{WindowsSDKLibVersion})
             string(REGEX REPLACE "\\\\$" "" WINDOWS_SDK_VERSION "$ENV{WindowsSDKLibVersion}")
         else()
-            message(FATAL_ERROR "ShaderMake: WindowsSDK is not installed (CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION is not defined; WindowsSDKLibVersion is '$ENV{WindowsSDKLibVersion}')!")
+            set(WINDOWS_SDK_VERSION ${CMAKE_SYSTEM_VERSION})
+            if("${WINDOWS_SDK_VERSION}" STREQUAL "")
+                message(FATAL_ERROR "ShaderMake: Failed to detect WindowsSDK version!")
+            endif()
         endif()
-
+        
+        # Find Windows SDK root
         get_filename_component(WINDOWS_SDK_ROOT "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]" ABSOLUTE)
+        if("${WINDOWS_SDK_ROOT}" STREQUAL "")
+            message(FATAL_ERROR "ShaderMake: Failed to detect WindowsSDK path!")
+        endif()
+        
+        # Check if we need to add .0 suffix
+        if(IS_DIRECTORY "${WINDOWS_SDK_ROOT}/bin/${WINDOWS_SDK_VERSION}.0")
+            set(WINDOWS_SDK_VERSION "${WINDOWS_SDK_VERSION}.0")
+        endif()
+        
+        # Set the path and find FXC
         set(WINDOWS_SDK_BIN "${WINDOWS_SDK_ROOT}/bin/${WINDOWS_SDK_VERSION}/${WINDOWS_ARCH}")
-
-        find_program(SHADERMAKE_FXC_PATH "${WINDOWS_SDK_BIN}/fxc")
+        find_program(SHADERMAKE_FXC_PATH 
+            NAMES fxc.exe fxc
+            HINTS ${WINDOWS_SDK_BIN}
+            REQUIRED
+        )
+        
+        if(SHADERMAKE_FXC_PATH)
+            message(STATUS "ShaderMake: Found FXC at ${SHADERMAKE_FXC_PATH}")
+        endif()
     endif()
 endif()
 
