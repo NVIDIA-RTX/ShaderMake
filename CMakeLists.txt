@@ -17,7 +17,12 @@ endif()
 if(IS_SUBMODULE)
     set(SHADERMAKE_BIN_OUTPUT_PATH "" CACHE STRING "")
 else()
-    set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "")
+    get_property(IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+
+    if(IS_MULTI_CONFIG)
+        set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "")
+    endif()
+
     set(SHADERMAKE_BIN_OUTPUT_PATH "${CMAKE_SOURCE_DIR}/bin" CACHE STRING "")
 endif()
 
@@ -29,9 +34,9 @@ option(SHADERMAKE_FIND_SLANG "Download Slang from GitHub and populate 'SHADERMAK
 option(SHADERMAKE_FIND_COMPILERS "Master switch" ${IS_SUBMODULE})
 option(SHADERMAKE_TOOL "Use ShaderMake as an external tool and hide the executable from the parent project IDE" OFF)
 
-set(SHADERMAKE_DXC_VERSION "v1.8.2502" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
-set(SHADERMAKE_DXC_DATE "2025_02_20" CACHE STRING "DXC release date") # DXC releases on GitHub have this in download links :(
-set(SHADERMAKE_SLANG_VERSION "2025.9.1" CACHE STRING "Slang to download from 'GitHub/Shader-slang' releases")
+set(SHADERMAKE_DXC_VERSION "v1.8.2505" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
+set(SHADERMAKE_DXC_DATE "2025_05_24" CACHE STRING "DXC release date") # DXC releases on GitHub have this in download links :(
+set(SHADERMAKE_SLANG_VERSION "2025.12.1" CACHE STRING "Slang to download from 'GitHub/Shader-slang' releases")
 
 # Globals?
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
