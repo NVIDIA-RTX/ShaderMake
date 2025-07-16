@@ -416,11 +416,11 @@ public:
             fprintf(stream, "%u,", value);
 
             if (value < 10)
-                m_lineLength += 3;
+                m_lineLength += 2;
             else if (value < 100)
-                m_lineLength += 4;
+                m_lineLength += 3;
             else
-                m_lineLength += 5;
+                m_lineLength += 4;
         }
 
         return true;
@@ -453,32 +453,6 @@ public:
 private:
     uint32_t m_lineLength = 129;
 };
-
-void DumpShader(const TaskData& taskData, const uint8_t* data, size_t dataSize)
-{
-    string file = taskData.outputFileWithoutExt + g_OutputExt;
-
-    if (g_Options.binary || g_Options.binaryBlob || (g_Options.headerBlob && !taskData.combinedDefines.empty()))
-    {
-        DataOutputContext context(file.c_str(), false);
-        if (!context.stream)
-            return;
-
-        context.WriteDataAsBinary(data, dataSize);
-    }
-
-    if (g_Options.header || (g_Options.headerBlob && taskData.combinedDefines.empty()))
-    {
-        DataOutputContext context((file + ".h").c_str(), true);
-        if (!context.stream)
-            return;
-
-        string shaderName = GetShaderName(taskData.outputFileWithoutExt);
-        context.WriteTextPreamble(shaderName.c_str(), taskData.combinedDefines);
-        context.WriteDataAsText(data, dataSize);
-        context.WriteTextEpilog();
-    }
-}
 
 void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool willRetry, const char* message)
 {
@@ -931,7 +905,6 @@ void ExeCompile()
             g_TaskData.pop_back();
         }
 
-        bool convertBinaryOutputToHeader = false;
         string outputFile = taskData.outputFileWithoutExt + g_OutputExt;
 
         // Building command line
@@ -945,9 +918,6 @@ void ExeCompile()
 
             if (g_Options.slang)
             {
-                if (g_Options.header || (g_Options.headerBlob && taskData.combinedDefines.empty()))
-                    convertBinaryOutputToHeader = true;
-
                 // Slang defaults to slang language mode unless -lang <other language> sets something else.
                 // For HLSL compatibility mode:
                 //    - use -lang hlsl to set language mode to HLSL
@@ -1047,15 +1017,7 @@ void ExeCompile()
                 cmd << " -nologo";
 
                 // Output file
-                if (g_Options.binary || g_Options.binaryBlob || (g_Options.headerBlob && !taskData.combinedDefines.empty()))
-                    cmd << " -Fo " << EscapePath(outputFile);
-                if (g_Options.header || (g_Options.headerBlob && taskData.combinedDefines.empty()))
-                {
-                    string name = GetShaderName(taskData.outputFileWithoutExt);
-
-                    cmd << " -Fh " << EscapePath(outputFile) << ".h";
-                    cmd << " -Vn " << name;
-                }
+                cmd << " -Fo " << EscapePath(outputFile);
 
                 // Profile
                 string profile = taskData.profile + "_";
@@ -1202,8 +1164,8 @@ void ExeCompile()
                 willRetry = true;
         }
 
-        // Slang cannot produce .h files directly, so we convert its binary output to .h here if needed
-        if (isSucceeded && convertBinaryOutputToHeader)
+        // Convert to headers if needed
+        if (isSucceeded && (g_Options.header || (g_Options.headerBlob && taskData.combinedDefines.empty())))
         {
             vector<uint8_t> buffer;
             if (ReadBinaryFile(outputFile.c_str(), buffer))
