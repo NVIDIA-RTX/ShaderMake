@@ -971,6 +971,10 @@ void ExeCompile()
                 else
                     cmd << " -matrix-layout-column-major";
 
+                // Debug symbols
+                if (g_Options.pdb || g_Options.embedPdb)
+                    cmd << " -g";
+
                 if (g_Options.platform == SPIRV)
                 {
                     // Uses the entrypoint name from the source instead of 'main' in the SPIRV output
