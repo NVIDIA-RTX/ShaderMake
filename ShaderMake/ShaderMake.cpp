@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2014-2023, NVIDIA CORPORATION. All rights reserved.
+Copyright (c) 2014-2025, NVIDIA CORPORATION. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -1183,9 +1183,20 @@ void ExeCompile()
                     context.WriteDataAsText(buffer.data(), buffer.size());
                     context.WriteTextEpilog();
 
-                    // Delete the binary file if it's not requested
+                    // Try to delete the binary file if it's not requested.
+					// In the unlikely event it fails (one system sometimes holds the file handle too long),
+					// avoid a fatal exit because it's merely an intermediate file.
                     if (!g_Options.binary)
-                        fs::remove(outputFile);
+					{
+						try
+						{
+							fs::remove(outputFile);
+						}
+						catch(const std::exception& e)
+						{
+							Printf(YELLOW "Could not delete temporary binary file '%s': %s\n", outputFile.c_str(), e.what());
+						}
+					}
                 }
                 else
                 {
