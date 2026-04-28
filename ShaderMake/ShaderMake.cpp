@@ -37,6 +37,7 @@ THE SOFTWARE.
 #include <cstdio>
 #include <csignal>
 #include <cstdarg>
+#include <cstdint>
 #include <cstring>
 #include <system_error>
 
@@ -564,6 +565,44 @@ uint64_t Timer_GetTicks()
 // OPTIONS
 //=====================================================================================================================
 
+// Shader model in major_minor form for DXC/Slang profiles (e.g. 6_5, 6_10); each part is 1-4 decimal digits.
+static bool ParseShaderModelVersion(const char* sm, uint32_t& outMajor, uint32_t& outMinor)
+{
+    if (!sm || !sm[0])
+        return false;
+
+    const char* underscore = strchr(sm, '_');
+    if (!underscore || underscore == sm || !underscore[1])
+        return false;
+    if (strchr(underscore + 1, '_'))
+        return false;
+
+    size_t majorLen = size_t(underscore - sm);
+    size_t minorLen = strlen(underscore + 1);
+    if (majorLen > 4 || minorLen > 4)
+        return false;
+
+    uint32_t major = 0;
+    for (const char* p = sm; p < underscore; ++p)
+    {
+        if (*p < '0' || *p > '9')
+            return false;
+        major = major * 10 + uint32_t(*p - '0');
+    }
+
+    uint32_t minor = 0;
+    for (const char* p = underscore + 1; *p; ++p)
+    {
+        if (*p < '0' || *p > '9')
+            return false;
+        minor = minor * 10 + uint32_t(*p - '0');
+    }
+
+    outMajor = major;
+    outMinor = minor;
+    return true;
+}
+
 int32_t AddInclude(struct argparse* self, const struct argparse_option* option)
 { ((Options*)(option->data))->includeDirs.push_back(*(const char**)option->value); UNUSED(self); return 0; }
 
@@ -598,7 +637,7 @@ bool Options::Parse(int32_t argc, const char** argv)
             OPT_BOOLEAN('H', "headerBlob", &headerBlob, "Output header blob files", nullptr, 0, 0),
             OPT_STRING(0, "compiler", &compiler, "Path to a FXC/DXC/Slang compiler executable", nullptr, 0, 0),
         OPT_GROUP("Compiler settings:"),
-            OPT_STRING('m', "shaderModel", &shaderModel, "Shader model for DXIL/SPIRV (always SM 5.0 for DXBC) in 'X_Y' format", nullptr, 0, 0),
+            OPT_STRING('m', "shaderModel", &shaderModel, "Shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
             OPT_INTEGER('O', "optimization", &optimizationLevel, "Optimization level 0-3 (default = 3, disabled = 0)", nullptr, 0, 0),
             OPT_STRING('X', "compilerOptions", &unused, "Custom command line options for the compiler, separated by spaces", AddCompilerOptions, (intptr_t)this, 0),
             OPT_BOOLEAN(0, "WX", &warningsAreErrors, "Maps to '-WX' DXC/FXC option: warnings are errors", nullptr, 0, 0),
@@ -692,9 +731,11 @@ bool Options::Parse(int32_t argc, const char** argv)
         return false;
     }
 
-    if (strlen(shaderModel) != 3 || strstr(shaderModel, "."))
+    uint32_t smMajor = 0, smMinor = 0;
+    if (!ParseShaderModelVersion(shaderModel, smMajor, smMinor))
     {
-        Printf(RED "ERROR: Shader model ('%s') must have format 'X_Y'!\n", shaderModel);
+        Printf(RED "ERROR: Shader model ('%s') must be major_minor with decimal digits (e.g. '6_5', '6_10')!\n",
+            shaderModel ? shaderModel : "");
         return false;
     }
 
@@ -809,7 +850,7 @@ bool ConfigLine::Parse(int32_t argc, const char** argv)
         OPT_STRING('o', "output", &outputDir, "(Optional) output subdirectory", nullptr, 0, 0),
         OPT_INTEGER('O', "optimization", &optimizationLevel, "(Optional) optimization level", nullptr, 0, 0),
         OPT_STRING('s', "outputSuffix", &outputSuffix, "(Optional) suffix to add before extension after filename", nullptr, 0, 0),
-        OPT_STRING('m', "shaderModel", &shaderModel, "(Optional) shader model for DXIL/SPIRV (always SM 5.0 for DXBC) in 'X_Y' format", nullptr, 0, 0),
+        OPT_STRING('m', "shaderModel", &shaderModel, "(Optional) shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
 
         OPT_STRING(0, "compilerOptionsDXIL", &unused, "Custom command line options for dxil, separated by spaces", AddCompilerOptionsDXIL, (intptr_t)this, 0),
         OPT_STRING(0, "compilerOptionsSPIRV", &unused, "Custom command line options for spirv, separated by spaces", AddCompilerOptionsSPIRV, (intptr_t)this, 0),
@@ -842,9 +883,10 @@ bool ConfigLine::Parse(int32_t argc, const char** argv)
         return false;
     }
 
-    if (strlen(shaderModel) != 3 || strstr(shaderModel, "."))
+    uint32_t smMajor = 0, smMinor = 0;
+    if (!ParseShaderModelVersion(shaderModel, smMajor, smMinor))
     {
-        Printf(RED "ERROR: Shader model ('%s') must have format 'X_Y'!\n", shaderModel);
+        Printf(RED "ERROR: Shader model ('%s') must be major_minor with decimal digits (e.g. '6_5', '6_10')!\n", shaderModel);
         return false;
     }
 
@@ -1048,8 +1090,10 @@ void ExeCompile()
                 // Args
                 cmd << optimizationLevelRemap[taskData.optimizationLevel];
 
-                uint32_t shaderModelIndex = (taskData.shaderModel[0] - '0') * 10 + (taskData.shaderModel[2] - '0');
-                if (g_Options.platform != DXBC && shaderModelIndex >= 62)
+                uint32_t smMajor = 0, smMinor = 0;
+                if (ParseShaderModelVersion(taskData.shaderModel.c_str(), smMajor, smMinor) &&
+                    g_Options.platform != DXBC &&
+                    (smMajor > 6 || (smMajor == 6 && smMinor >= 2)))
                     cmd << " -enable-16bit-types";
 
                 if (g_Options.warningsAreErrors)
