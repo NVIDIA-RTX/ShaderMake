@@ -87,6 +87,10 @@ Other options:
 - `--bRegShift` (int) - register shift for constant (`b#`) resources
 - `--uRegShift` (int) - register shift for UAV (`u#`) resources
 - `--noRegShifts` - Don't specify any register shifts for the compiler
+- `--resourceHeapBinding` (int) - Maps to `-fvk-bind-resource-heap <binding> <set>`: binding for SM 6.6 `ResourceDescriptorHeap` (requires `--resourceHeapSet`)
+- `--resourceHeapSet` (int) - descriptor set for `-fvk-bind-resource-heap`
+- `--counterHeapBinding` (int) - Maps to `-fvk-bind-counter-heap <binding> <set>`: binding for `RWStructuredBuffer` counters accessed via `ResourceDescriptorHeap` (requires `--counterHeapSet`)
+- `--counterHeapSet` (int) - descriptor set for `-fvk-bind-counter-heap`
 
 ## Config file structure
 
