@@ -34,9 +34,9 @@ option(SHADERMAKE_FIND_SLANG "Download Slang from GitHub and populate 'SHADERMAK
 option(SHADERMAKE_FIND_COMPILERS "Master switch" ${IS_SUBMODULE})
 option(SHADERMAKE_TOOL "Use ShaderMake as an external tool and hide the executable from the parent project IDE" OFF)
 
-set(SHADERMAKE_DXC_VERSION "v1.9.2602" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
-set(SHADERMAKE_DXC_DATE "2026_02_20" CACHE STRING "DXC release date") # DXC releases on GitHub have this in download links :(
-set(SHADERMAKE_SLANG_VERSION "2026.10.2" CACHE STRING "Slang to download from 'GitHub/Shader-slang' releases")
+set(SHADERMAKE_DXC_VERSION "v1.9.2607" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
+set(SHADERMAKE_DXC_DATE "2026_07_29" CACHE STRING "DXC release date") # DXC releases on GitHub have this in download links :(
+set(SHADERMAKE_SLANG_VERSION "2026.16.1" CACHE STRING "Slang to download from 'GitHub/Shader-slang' releases")
 
 # Globals?
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
