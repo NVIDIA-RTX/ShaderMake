@@ -99,6 +99,11 @@ struct Options
     uint32_t tRegShift = 200;
     uint32_t bRegShift = 300;
     uint32_t uRegShift = 400;
+    // SPIRV: SM 6.6 direct heap indexing (HLSL ResourceDescriptorHeap). -1 leaves the flag off.
+    int32_t resourceHeapBinding = -1; // -fvk-bind-resource-heap <binding> <set>
+    int32_t resourceHeapSet = -1;
+    int32_t counterHeapBinding = -1;  // -fvk-bind-counter-heap <binding> <set>
+    int32_t counterHeapSet = -1;
     uint32_t optimizationLevel = 3;
     int32_t retryCount = 10; // default 10 retries for compilation task sub-process failures
     Platform platform = DXBC;
@@ -902,6 +907,10 @@ bool Options::Parse(int32_t argc, const char** argv)
             OPT_INTEGER(0, "bRegShift", &bRegShift, "SPIRV: register shift for constant (b#) resources", nullptr, 0, 0),
             OPT_INTEGER(0, "uRegShift", &uRegShift, "SPIRV: register shift for UAV (u#) resources", nullptr, 0, 0),
             OPT_BOOLEAN(0, "noRegShifts", &noRegShifts, "Don't specify any register shifts for the compiler", nullptr, 0, 0),
+            OPT_INTEGER(0, "resourceHeapBinding", &resourceHeapBinding, "SPIRV: binding for '-fvk-bind-resource-heap' (SM 6.6 ResourceDescriptorHeap)", nullptr, 0, 0),
+            OPT_INTEGER(0, "resourceHeapSet", &resourceHeapSet, "SPIRV: descriptor set for '-fvk-bind-resource-heap'", nullptr, 0, 0),
+            OPT_INTEGER(0, "counterHeapBinding", &counterHeapBinding, "SPIRV: binding for '-fvk-bind-counter-heap' (RWStructuredBuffer counters)", nullptr, 0, 0),
+            OPT_INTEGER(0, "counterHeapSet", &counterHeapSet, "SPIRV: descriptor set for '-fvk-bind-counter-heap'", nullptr, 0, 0),
         OPT_END(),
     };
 
@@ -1378,6 +1387,13 @@ static void ExeCompile()
                             cmd << " -fvk-u-shift " << g_Options.uRegShift << " " << space;
                         }
                     }
+
+                    // SM 6.6 direct heap indexing: map HLSL ResourceDescriptorHeap (and the implicit
+                    // RWStructuredBuffer counters) onto the descriptor sets the host binds them to.
+                    if (g_Options.resourceHeapBinding >= 0 && g_Options.resourceHeapSet >= 0)
+                        cmd << " -fvk-bind-resource-heap " << g_Options.resourceHeapBinding << " " << g_Options.resourceHeapSet;
+                    if (g_Options.counterHeapBinding >= 0 && g_Options.counterHeapSet >= 0)
+                        cmd << " -fvk-bind-counter-heap " << g_Options.counterHeapBinding << " " << g_Options.counterHeapSet;
                 }
                 else // Not supported by SPIRV gen
                 {
