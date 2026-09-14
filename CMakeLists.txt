@@ -36,7 +36,7 @@ option(SHADERMAKE_TOOL "Use ShaderMake as an external tool and hide the executab
 
 set(SHADERMAKE_DXC_VERSION "v1.9.2607" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
 set(SHADERMAKE_DXC_DATE "2026_07_29" CACHE STRING "DXC release date") # DXC releases on GitHub have this in download links :(
-set(SHADERMAKE_SLANG_VERSION "2026.16.1" CACHE STRING "Slang to download from 'GitHub/Shader-slang' releases")
+set(SHADERMAKE_SLANG_VERSION "2026.17.1" CACHE STRING "Slang to download from 'GitHub/Shader-slang' releases")
 
 # Globals?
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
