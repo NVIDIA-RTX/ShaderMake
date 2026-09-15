@@ -23,6 +23,7 @@ THE SOFTWARE.
 #include "argparse.h"
 #include "ShaderBlob.h"
 
+#include <algorithm>
 #include <sstream>
 #include <fstream>
 #include <map>
@@ -40,13 +41,16 @@ THE SOFTWARE.
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <cerrno>
 #include <system_error>
+#include <utility>
 
 #ifdef _WIN32
     #include <windows.h>
 #else
     #include <unistd.h>
     #include <limits.h>
+    #include <sys/wait.h>
 #endif
 
 using namespace std;
@@ -66,7 +70,6 @@ namespace fs = filesystem;
 #ifdef _MSC_VER
     #define popen _popen
     #define pclose _pclose
-    #define putenv _putenv
 #endif
 
 enum Platform : uint8_t
@@ -78,6 +81,20 @@ enum Platform : uint8_t
     PLATFORMS_NUM
 };
 
+enum CompilerType : uint8_t
+{
+    COMPILER_FXC,
+    COMPILER_DXC,
+    COMPILER_SLANG,
+};
+
+struct CompilerAlias
+{
+    string name;
+    fs::path path;
+    CompilerType type = COMPILER_DXC;
+};
+
 struct Options
 {
     vector<fs::path> includeDirs;
@@ -85,6 +102,8 @@ struct Options
     vector<string> defines;
     vector<string> spirvExtensions = {"SPV_EXT_descriptor_indexing", "KHR"};
     vector<string> compilerOptions;
+    vector<string> compilerAliasArgs;
+    vector<CompilerAlias> compilerAliases;
     fs::path configFile;
     fs::path sourceDir;
     const char* projectName = "";
@@ -101,7 +120,9 @@ struct Options
     uint32_t uRegShift = 400;
     uint32_t optimizationLevel = 3;
     int32_t retryCount = 10; // default 10 retries for compilation task sub-process failures
+    int32_t jobs = 0;
     Platform platform = DXBC;
+    CompilerType compilerType = COMPILER_DXC;
     bool serial = false;
     bool flatten = false;
     bool force = false;
@@ -143,6 +164,8 @@ struct ConfigLine
     const char* outputDir = nullptr;
     const char* outputSuffix = nullptr;
     const char* shaderModel = nullptr;
+    const char* compilerDXIL = nullptr;
+    const char* compilerSPIRV = nullptr;
 
     uint32_t optimizationLevel = USE_GLOBAL_OPTIMIZATION_LEVEL;
     bool noRegShifts = false;
@@ -160,9 +183,11 @@ struct TaskData
     string entryPoint;
     string profile;
     string shaderModel;
+    string compiler;
     string outputFileWithoutExt;
     string combinedDefines;
     uint32_t optimizationLevel = 3;
+    CompilerType compilerType = COMPILER_DXC;
     bool noRegShifts = false;
 };
 
@@ -172,13 +197,23 @@ struct BlobEntry
     string combinedDefines;
 };
 
+struct BuildSignature
+{
+    fs::path path;
+    string value;
+    bool changed = false;
+};
+
 Options g_Options;
 map<fs::path, fs::file_time_type> g_HierarchicalUpdateTimes;
 map<string, vector<BlobEntry>> g_ShaderBlobs;
+map<string, uint32_t> g_OutputLines;
+map<string, BuildSignature> g_CompilerAliasBuildSignatures;
 vector<TaskData> g_TaskData;
 mutex g_TaskMutex;
+mutex g_ProgressMutex;
 atomic<uint32_t> g_ProcessedTaskCount;
-atomic<uint32_t> g_PrevProgress;
+uint32_t g_PrevProgress;
 atomic<int32_t> g_TaskRetryCount;
 atomic<bool> g_Terminate = false;
 atomic<uint32_t> g_FailedTaskCount = 0;
@@ -239,7 +274,7 @@ static string PathToString(fs::path path)
 static fs::path RemoveLeadingDotDots(const fs::path& path)
 {
     auto it = path.begin();
-    while (*it == ".." && it != path.end())
+    while (it != path.end() && *it == "..")
         ++it;
 
     fs::path result;
@@ -263,6 +298,37 @@ static bool IsSlangCompiler(const char* compiler)
     return name == "slangc" || name == "slangc.exe";
 }
 
+static string ToUpper(string value)
+{
+    transform(value.begin(), value.end(), value.begin(), [](char ch) { return (char)toupper((unsigned char)ch); });
+
+    return value;
+}
+
+static bool GetCompilerType(const string& name, CompilerType& type)
+{
+    if (name == "DXC")
+        type = COMPILER_DXC;
+    else if (name == "SLANG")
+        type = COMPILER_SLANG;
+    else
+        return false;
+
+    return true;
+}
+
+static const CompilerAlias* FindCompilerAlias(const char* name)
+{
+    string normalizedName = ToUpper(name);
+    for (const CompilerAlias& compilerAlias : g_Options.compilerAliases)
+    {
+        if (compilerAlias.name == normalizedName)
+            return &compilerAlias;
+    }
+
+    return nullptr;
+}
+
 static bool HasDefine(const vector<string>& defines, const char* name)
 {
     size_t nameLength = strlen(name);
@@ -279,6 +345,18 @@ static void AddImplicitDefine(vector<string>& defines, const char* name)
 {
     if (!HasDefine(defines, name))
         defines.push_back(name);
+}
+
+static bool HasConfigDefine(const char* name)
+{
+    if (HasDefine(g_Options.defines, name))
+        return true;
+    if (strcmp(name, "__SLANG__") == 0)
+        return g_Options.compilerType == COMPILER_SLANG;
+    if (strcmp(name, "__spirv__") == 0)
+        return g_Options.platform == SPIRV;
+
+    return false;
 }
 
 static inline bool IsCompilerOptionBoundary(const string& options, size_t pos)
@@ -319,17 +397,46 @@ static bool HasCompilerOption(const string& options, const char* option)
     return false;
 }
 
-static string TranslateCompilerOptions(const string& options)
+static void TranslateSlangSpirvExtensions(string& options)
+{
+    static const char* prefix = "-fspv-extension=";
+    const size_t prefixLength = strlen(prefix);
+    size_t pos = 0;
+    while ((pos = options.find(prefix, pos)) != string::npos)
+    {
+        if (pos != 0 && !IsSpace(options[pos - 1]))
+        {
+            pos += prefixLength;
+            continue;
+        }
+
+        size_t extensionPos = pos + prefixLength;
+        size_t end = options.find_first_of(" \t\r\n", extensionPos);
+        string extension = options.substr(extensionPos, end - extensionPos);
+        if (extension == "SPV_EXT_mesh_shader")
+            options.erase(pos, end - pos);
+        else if (extension.compare(0, 4, "SPV_") == 0)
+        {
+            string replacement = "-capability " + extension;
+            options.replace(pos, end - pos, replacement);
+            pos += replacement.size();
+        }
+        else
+            pos = end;
+    }
+}
+
+static string TranslateCompilerOptions(const string& options, CompilerType compilerType)
 {
     if (g_Options.platform != SPIRV)
         return options;
 
     string translatedOptions = options;
-    if (g_Options.slang)
+    if (compilerType == COMPILER_SLANG)
     {
-        ReplaceCompilerOption(translatedOptions, "-fspv-extension=SPV_EXT_mesh_shader", "");
-        ReplaceCompilerOption(translatedOptions, "-fspv-extension=SPV_EXT_descriptor_heap", "-capability SPV_EXT_descriptor_heap");
+        TranslateSlangSpirvExtensions(translatedOptions);
         ReplaceCompilerOption(translatedOptions, "-fspv-use-descriptor-heap", "-capability spvDescriptorHeapEXT -spirv-unified-descriptor-heap-stride");
+        ReplaceCompilerOption(translatedOptions, "-fspv-use-unknown-image-format", "-default-image-format-unknown");
     }
     else if (HasCompilerOption(translatedOptions, "-fspv-use-descriptor-heap") &&
         !HasCompilerOption(translatedOptions, "-fspv-extension=SPV_EXT_descriptor_heap"))
@@ -340,11 +447,11 @@ static string TranslateCompilerOptions(const string& options)
     return translatedOptions;
 }
 
-static void AppendCompilerOptions(ostringstream& cmd, const vector<string>& compilerOptions)
+static void AppendCompilerOptions(ostringstream& cmd, const vector<string>& compilerOptions, CompilerType compilerType)
 {
     for (const string& options : compilerOptions)
     {
-        string translatedOptions = TranslateCompilerOptions(options);
+        string translatedOptions = TranslateCompilerOptions(options, compilerType);
         if (translatedOptions.find_first_not_of(" \t\r\n") != string::npos)
             cmd << " " << translatedOptions;
     }
@@ -383,21 +490,89 @@ static void AppendBuildSignaturePaths(ostringstream& signature, const char* name
         AppendBuildSignatureValue(signature, name, PathToString(path));
 }
 
+static void AppendCompilerBuildSignature(ostringstream& signature, const fs::path& compilerPath, CompilerType compilerType)
+{
+    fs::path path = fs::absolute(compilerPath).lexically_normal();
+    AppendBuildSignatureValue(signature, "compiler", PathToString(path));
+    AppendBuildSignatureValue(signature, "compilerType", to_string(compilerType));
+    AppendBuildSignatureValue(signature, "compilerSize", to_string(fs::file_size(path)));
+    AppendBuildSignatureValue(signature, "compilerTime", to_string(fs::last_write_time(path).time_since_epoch().count()));
+
+#ifdef _WIN32
+    static const char* dxcSidecars[] = {"dxcompiler.dll", "dxil.dll"};
+    static const char* slangSidecars[] = {
+        "gfx.dll", "slang-compiler.dll", "slang-glsl-module.dll", "slang-glslang.dll",
+        "slang-llvm.dll", "slang-rt.dll", "slang.dll"
+    };
+#elif defined(__APPLE__)
+    static const char* dxcSidecars[] = {"libdxcompiler.dylib", "libdxil.dylib"};
+    static const char* slangSidecars[] = {
+        "libgfx.dylib", "libslang-compiler.dylib", "libslang-glsl-module.dylib", "libslang-glslang.dylib",
+        "libslang-llvm.dylib", "libslang-rt.dylib", "libslang.dylib"
+    };
+#else
+    static const char* dxcSidecars[] = {"libdxcompiler.so", "libdxil.so"};
+    static const char* slangSidecars[] = {
+        "libgfx.so", "libslang-compiler.so", "libslang-glsl-module.so", "libslang-glslang.so",
+        "libslang-llvm.so", "libslang-rt.so", "libslang.so"
+    };
+#endif
+
+    const char* const* sidecars = nullptr;
+    size_t sidecarNum = 0;
+    if (compilerType == COMPILER_DXC)
+    {
+        sidecars = dxcSidecars;
+        sidecarNum = COUNT_OF(dxcSidecars);
+    }
+    else if (compilerType == COMPILER_SLANG)
+    {
+        sidecars = slangSidecars;
+        sidecarNum = COUNT_OF(slangSidecars);
+    }
+
+    fs::path sidecarDirs[] = {
+        path.parent_path(),
+        path.parent_path().parent_path() / "lib",
+        path.parent_path().parent_path() / "lib64",
+    };
+
+    for (const fs::path& sidecarDir : sidecarDirs)
+    {
+        for (size_t i = 0; i < sidecarNum; i++)
+        {
+            fs::path sidecarPath = sidecarDir / sidecars[i];
+            if (!fs::exists(sidecarPath))
+                continue;
+
+            AppendBuildSignatureValue(signature, "compilerSidecar", PathToString(sidecarPath));
+            AppendBuildSignatureValue(signature, "compilerSidecarSize", to_string(fs::file_size(sidecarPath)));
+            AppendBuildSignatureValue(signature, "compilerSidecarTime", to_string(fs::last_write_time(sidecarPath).time_since_epoch().count()));
+        }
+    }
+}
+
+static string GetCompilerBuildSignature(const fs::path& compilerPath, CompilerType compilerType)
+{
+    ostringstream signature;
+    AppendBuildSignatureValue(signature, "version", "1");
+    AppendCompilerBuildSignature(signature, compilerPath, compilerType);
+
+    return signature.str();
+}
+
 static string GetBuildSignature()
 {
-    fs::path compilerPath = fs::absolute(g_Options.compiler).lexically_normal();
     fs::path outputPath = fs::absolute(g_Options.outputDir).lexically_normal();
     ostringstream signature;
 
-    AppendBuildSignatureValue(signature, "version", "1");
+    AppendBuildSignatureValue(signature, "version", "2");
     AppendBuildSignatureValue(signature, "config", PathToString(g_Options.configFile));
     AppendBuildSignatureValue(signature, "source", PathToString(g_Options.sourceDir));
     AppendBuildSignatureValue(signature, "output", PathToString(outputPath));
     AppendBuildSignatureValue(signature, "platform", g_Options.platformName);
     AppendBuildSignatureValue(signature, "outputExt", g_OutputExt);
-    AppendBuildSignatureValue(signature, "compiler", PathToString(compilerPath));
-    AppendBuildSignatureValue(signature, "compilerSize", to_string(fs::file_size(compilerPath)));
-    AppendBuildSignatureValue(signature, "compilerTime", to_string(fs::last_write_time(compilerPath).time_since_epoch().count()));
+    AppendCompilerBuildSignature(signature, g_Options.compiler, g_Options.compilerType);
     AppendBuildSignatureValue(signature, "shaderModel", g_Options.shaderModel);
     AppendBuildSignatureValue(signature, "optimization", to_string(g_Options.optimizationLevel));
     AppendBuildSignatureValue(signature, "slang", to_string(g_Options.slang));
@@ -431,6 +606,9 @@ static string GetBuildSignature()
 
 static fs::path GetBuildSignaturePath()
 { return fs::path(g_Options.outputDir) / (".ShaderMake." + string(g_Options.platformName) + ".signature"); }
+
+static fs::path GetCompilerAliasBuildSignaturePath(const string& name)
+{ return fs::path(g_Options.outputDir) / (".ShaderMake." + string(g_Options.platformName) + "." + name + ".compiler.signature"); }
 
 static bool IsBuildSignatureCurrent(const fs::path& path, const string& signature)
 {
@@ -682,7 +860,7 @@ private:
     uint32_t m_lineLength = 129;
 };
 
-static void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool willRetry, const char* message)
+static void UpdateProgress(TaskData& taskData, bool isSucceeded, bool willRetry, const char* message)
 {
     // IMPORTANT: do not split into several "Printf" calls because multi-threading access to the console can mess up the order
     if (isSucceeded)
@@ -703,7 +881,8 @@ static void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool will
             if (g_Options.compactProgress)
             {
                 uint32_t progressSnapped = (uint32_t(progress + 0.5f) / 10) * 10;
-                if (progressSnapped != g_PrevProgress)
+                lock_guard<mutex> guard(g_ProgressMutex);
+                if (progressSnapped > g_PrevProgress)
                 {
                     Printf(GREEN "(%3u%%)" GRAY " %s %s\n", progressSnapped, g_Options.projectName, g_Options.platformName);
                     g_PrevProgress = progressSnapped;
@@ -721,7 +900,7 @@ static void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool will
     }
     else
     {
-        // If retrying, requeue the task and try again without counting failure or terminating
+        // If retrying, requeue the task and try again without counting failure or terminating.
         if (willRetry)
         {
             Printf(YELLOW "( RETRY-QUEUED ) %s %s %s {%s} {%s}\n",
@@ -731,9 +910,7 @@ static void UpdateProgress(const TaskData& taskData, bool isSucceeded, bool will
                 taskData.combinedDefines.c_str());
 
             lock_guard<mutex> guard(g_TaskMutex);
-            g_TaskData.push_back(taskData);
-
-            --g_TaskRetryCount;
+            g_TaskData.push_back(std::move(taskData));
         }
         else
         {
@@ -830,6 +1007,36 @@ static bool ParseShaderModelVersion(const char* sm, uint32_t& outMajor, uint32_t
     return true;
 }
 
+static uint32_t GetSlangProfileMinSpirvVersion(const char* shaderModel)
+{
+    uint32_t major = 0;
+    uint32_t minor = 0;
+    if (!ParseShaderModelVersion(shaderModel, major, minor) || major < 6)
+        return 100;
+    if (major == 6 && minor <= 2)
+        return 103;
+    if (major == 6 && minor <= 7)
+        return 104;
+    if (major == 6)
+        return 105;
+
+    return 106;
+}
+
+static uint32_t GetVulkanMaxSpirvVersion(const char* vulkanVersion)
+{
+    if (strcmp(vulkanVersion, "1.0") == 0)
+        return 100;
+    if (strcmp(vulkanVersion, "1.1") == 0)
+        return 103;
+    if (strcmp(vulkanVersion, "1.1spirv1.4") == 0)
+        return 104;
+    if (strcmp(vulkanVersion, "1.2") == 0)
+        return 105;
+
+    return 106;
+}
+
 static int32_t AddInclude(struct argparse* self, const struct argparse_option* option)
 { ((Options*)(option->data))->includeDirs.push_back(*(const char**)option->value); UNUSED(self); return 0; }
 
@@ -844,6 +1051,9 @@ static int32_t AddSpirvExtension(struct argparse* self, const struct argparse_op
 
 static int32_t AddCompilerOptions(struct argparse* self, const struct argparse_option* option)
 { ((Options*)(option->data))->compilerOptions.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+
+static int32_t AddCompilerAlias(struct argparse* self, const struct argparse_option* option)
+{ ((Options*)(option->data))->compilerAliasArgs.push_back(*(const char**)option->value); UNUSED(self); return 0; }
 
 bool Options::Parse(int32_t argc, const char** argv)
 {
@@ -864,12 +1074,13 @@ bool Options::Parse(int32_t argc, const char** argv)
             OPT_BOOLEAN('H', "headerBlob", &headerBlob, "Output header blob files", nullptr, 0, 0),
             OPT_STRING(0, "compiler", &compiler, "Path to an FXC/DXC/Slang compiler executable", nullptr, 0, 0),
         OPT_GROUP("Compiler settings:"),
+            OPT_STRING(0, "compilerAlias", &unused, "Alternate compiler for config-local selection in NAME=path form", AddCompilerAlias, (intptr_t)this, 0),
             OPT_STRING('m', "shaderModel", &shaderModel, "Shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
             OPT_INTEGER('O', "optimization", &optimizationLevel, "Optimization level 0-3 (default = 3, disabled = 0)", nullptr, 0, 0),
             OPT_STRING('X', "compilerOptions", &unused, "Custom command line options for the compiler, separated by spaces", AddCompilerOptions, (intptr_t)this, 0),
             OPT_BOOLEAN(0, "WX", &warningsAreErrors, "Treat warnings as errors", nullptr, 0, 0),
             OPT_BOOLEAN(0, "allResourcesBound", &allResourcesBound, "Maps to '-all_resources_bound' DXC/FXC option: all resources bound", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "PDB", &pdb, "Output PDB files in 'out/PDB/' folder", nullptr, 0, 0),
+            OPT_BOOLEAN(0, "PDB", &pdb, "Output PDB files in 'out/PDB/' folder when supported", nullptr, 0, 0),
             OPT_BOOLEAN(0, "embedPDB", &embedPdb, "Embed PDB with the shader binary", nullptr, 0, 0),
             OPT_BOOLEAN(0, "stripReflection", &stripReflection, "Maps to '-Qstrip_reflect' DXC/FXC option: strip reflection information from a shader binary", nullptr, 0, 0),
             OPT_BOOLEAN(0, "matrixRowMajor", &matrixRowMajor, "Maps to '-Zpr' DXC/FXC option: pack matrices in row-major order", nullptr, 0, 0),
@@ -886,6 +1097,7 @@ bool Options::Parse(int32_t argc, const char** argv)
             OPT_STRING(0, "relaxedInclude", &unused, "Include file(s) not invoking re-compilation", AddRelaxedInclude, (intptr_t)this, 0),
             OPT_STRING(0, "outputExt", &outputExt, "Extension for output files, default is one of .dxbc, .dxil, .spirv", nullptr, 0, 0),
             OPT_BOOLEAN(0, "serial", &serial, "Disable multi-threading", nullptr, 0, 0),
+            OPT_INTEGER('j', "jobs", &jobs, "Maximum number of parallel compilation tasks (default = number of logical processors)", nullptr, 0, 0),
             OPT_BOOLEAN(0, "flatten", &flatten, "Flatten source directory structure in the output directory", nullptr, 0, 0),
             OPT_BOOLEAN(0, "continue", &continueOnError, "Continue compilation if an error occurred", nullptr, 0, 0),
             OPT_BOOLEAN(0, "colorize", &colorize, "Colorize console output", nullptr, 0, 0),
@@ -896,7 +1108,7 @@ bool Options::Parse(int32_t argc, const char** argv)
         OPT_GROUP("SPIRV options:"),
             OPT_STRING(0, "vulkanMemoryLayout", &vulkanMemoryLayout, "Vulkan memory layout: dx, gl or scalar", nullptr, 0, 0),
             OPT_STRING(0, "vulkanVersion", &vulkanVersion, "Vulkan environment version (default = 1.3)", nullptr, 0, 0),
-            OPT_STRING(0, "spirvExt", &unused, "DXC: add a permitted SPIR-V extension", AddSpirvExtension, (intptr_t)this, 0),
+            OPT_STRING(0, "spirvExt", &unused, "Add a permitted SPIR-V extension", AddSpirvExtension, (intptr_t)this, 0),
             OPT_INTEGER(0, "sRegShift", &sRegShift, "SPIRV: register shift for sampler (s#) resources", nullptr, 0, 0),
             OPT_INTEGER(0, "tRegShift", &tRegShift, "SPIRV: register shift for texture (t#) resources", nullptr, 0, 0),
             OPT_INTEGER(0, "bRegShift", &bRegShift, "SPIRV: register shift for constant (b#) resources", nullptr, 0, 0),
@@ -907,7 +1119,7 @@ bool Options::Parse(int32_t argc, const char** argv)
 
     static const char* usages[] = {
         "ShaderMake.exe -p {DXBC|DXIL|SPIRV} [-b] [-h] [-B] [-H] -c \"path/to/config\"\n"
-        "\t-o \"path/to/output\" --compiler \"path/to/compiler\" [other options]\n"
+        "\t-o \"path/to/output\" --compiler \"path/to/compiler\" [--compilerAlias \"NAME=path\"] [other options]\n"
         "\t-D DEF1 -D DEF2=1 ... -I \"path1\" -I \"path2\" ...",
         nullptr
     };
@@ -984,11 +1196,41 @@ bool Options::Parse(int32_t argc, const char** argv)
 
     // Keep --slang as an explicit override for wrappers and non-standard executable names.
     slang = slang || IsSlangCompiler(compiler);
+    compilerType = slang ? COMPILER_SLANG : (platform == DXBC ? COMPILER_FXC : COMPILER_DXC);
 
-    if (slang)
-        AddImplicitDefine(defines, "__SLANG__");
-    if (platform == SPIRV)
-        AddImplicitDefine(defines, "__spirv__");
+    for (const string& compilerAliasArg : compilerAliasArgs)
+    {
+        size_t separatorPos = compilerAliasArg.find('=');
+        string name = ToUpper(compilerAliasArg.substr(0, separatorPos));
+        fs::path path = separatorPos == string::npos ? fs::path() : fs::path(compilerAliasArg.substr(separatorPos + 1));
+        CompilerType type;
+
+        if (separatorPos == string::npos || name.empty() || path.empty())
+        {
+            Printf(RED "ERROR: Compiler alias '%s' must use NAME=path form!\n", compilerAliasArg.c_str());
+            return false;
+        }
+
+        if (!GetCompilerType(name, type))
+        {
+            Printf(RED "ERROR: Unsupported compiler alias '%s'! Only DXC and SLANG are supported.\n", name.c_str());
+            return false;
+        }
+
+        if (!fs::exists(path))
+        {
+            Printf(RED "ERROR: Compiler alias '%s' refers to missing file '%s'!\n", name.c_str(), PathToString(path).c_str());
+            return false;
+        }
+
+        if (FindCompilerAlias(name.c_str()))
+        {
+            Printf(RED "ERROR: Compiler alias '%s' is specified more than once!\n", name.c_str());
+            return false;
+        }
+
+        compilerAliases.push_back({name, path, type});
+    }
 
     if (outputExt)
         g_OutputExt = outputExt;
@@ -1021,6 +1263,12 @@ bool Options::Parse(int32_t argc, const char** argv)
     if (g_Options.retryCount < 0)
     {
         Printf(RED "ERROR: --retryCount must be greater than or equal to 0.\n");
+        return false;
+    }
+
+    if (jobs < 0)
+    {
+        Printf(RED "ERROR: --jobs must be greater than or equal to 0.\n");
         return false;
     }
 
@@ -1089,6 +1337,8 @@ bool ConfigLine::Parse(int32_t argc, const char** argv)
         OPT_INTEGER('O', "optimization", &optimizationLevel, "(Optional) optimization level", nullptr, 0, 0),
         OPT_STRING('s', "outputSuffix", &outputSuffix, "(Optional) suffix to insert before the first filename extension", nullptr, 0, 0),
         OPT_STRING('m', "shaderModel", &shaderModel, "(Optional) shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
+        OPT_STRING(0, "compilerDXIL", &compilerDXIL, "(Optional) compiler alias used only for DXIL", nullptr, 0, 0),
+        OPT_STRING(0, "compilerSPIRV", &compilerSPIRV, "(Optional) compiler alias used only for SPIRV", nullptr, 0, 0),
         OPT_STRING('X', "compilerOptions", &unused, "Custom command line options for the compiler, separated by spaces", AddLocalCompilerOptions, (intptr_t)this, 0),
         OPT_BOOLEAN(0, "noRegShifts", &noRegShifts, "Don't specify any register shifts for this shader", nullptr, 0, 0),
 
@@ -1098,7 +1348,7 @@ bool ConfigLine::Parse(int32_t argc, const char** argv)
     };
 
     static const char* usages[] = {
-        "path/to/shader -T profile [-E entry] [-O{0|1|2|3}] [-o \"output/subdirectory\"] [-s \"suffix\"] [-m 6_5] [-D DEF1={0,1}] [-D DEF2={0,1,2}] [-D DEF3] [-X \"options\"] [...]",
+        "path/to/shader -T profile [-E entry] [-O{0|1|2|3}] [-o \"output/subdirectory\"] [-s \"suffix\"] [-m 6_5] [--compilerDXIL NAME] [--compilerSPIRV NAME] [-D DEF1={0,1}] [-D DEF2={0,1,2}] [-D DEF3] [-X \"options\"] [...]",
         nullptr
     };
 
@@ -1165,6 +1415,18 @@ static bool ReadBinaryFile(const char* file, vector<uint8_t>& outData)
     return success;
 }
 
+static bool TryReserveRetry()
+{
+    int32_t retryCount = g_TaskRetryCount.load();
+    while (retryCount > 0)
+    {
+        if (g_TaskRetryCount.compare_exchange_weak(retryCount, retryCount - 1))
+            return true;
+    }
+
+    return false;
+}
+
 static void ExeCompile()
 {
     static const char* optimizationLevelRemap[] = {
@@ -1183,7 +1445,7 @@ static void ExeCompile()
             if (g_TaskData.empty())
                 return;
 
-            taskData = g_TaskData.back();
+            taskData = std::move(g_TaskData.back());
             g_TaskData.pop_back();
         }
 
@@ -1192,13 +1454,9 @@ static void ExeCompile()
         // Building command line
         ostringstream cmd;
         {
-            #ifdef _WIN32 // workaround for Windows
-                cmd << "%COMPILER%";
-            #else
-                cmd << "$COMPILER";
-            #endif
+            cmd << EscapePath(taskData.compiler);
 
-            if (g_Options.slang)
+            if (taskData.compilerType == COMPILER_SLANG)
             {
                 // Slang defaults to slang language mode unless -lang <other language> sets something else.
                 // For HLSL compatibility mode:
@@ -1223,6 +1481,12 @@ static void ExeCompile()
                     const char* spirvCapability = GetSlangSpirvCapability(g_Options.vulkanVersion);
                     if (spirvCapability)
                         cmd << " -capability " << spirvCapability;
+
+                    for (const string& extension : g_Options.spirvExtensions)
+                    {
+                        if (extension != "KHR" && extension != "SPV_EXT_mesh_shader")
+                            cmd << " -capability " << extension;
+                    }
                 }
 
                 // Output
@@ -1291,14 +1555,14 @@ static void ExeCompile()
                 }
 
                 // Custom options
-                AppendCompilerOptions(cmd, g_Options.compilerOptions);
-                AppendCompilerOptions(cmd, taskData.compilerOptions);
+                AppendCompilerOptions(cmd, g_Options.compilerOptions, taskData.compilerType);
+                AppendCompilerOptions(cmd, taskData.compilerOptions, taskData.compilerType);
 
                 // Platform-specific custom options
                 if (g_Options.platform == DXIL)
-                    AppendCompilerOptions(cmd, taskData.compilerOptionsDXIL);
+                    AppendCompilerOptions(cmd, taskData.compilerOptionsDXIL, taskData.compilerType);
                 else if (g_Options.platform == SPIRV)
-                    AppendCompilerOptions(cmd, taskData.compilerOptionsSPIRV);
+                    AppendCompilerOptions(cmd, taskData.compilerOptionsSPIRV, taskData.compilerType);
             }
             else
             {
@@ -1392,14 +1656,14 @@ static void ExeCompile()
                 }
 
                 // Custom options
-                AppendCompilerOptions(cmd, g_Options.compilerOptions);
-                AppendCompilerOptions(cmd, taskData.compilerOptions);
+                AppendCompilerOptions(cmd, g_Options.compilerOptions, taskData.compilerType);
+                AppendCompilerOptions(cmd, taskData.compilerOptions, taskData.compilerType);
 
                 // Platform-specific custom options
                 if (g_Options.platform == DXIL)
-                    AppendCompilerOptions(cmd, taskData.compilerOptionsDXIL);
+                    AppendCompilerOptions(cmd, taskData.compilerOptionsDXIL, taskData.compilerType);
                 else if (g_Options.platform == SPIRV)
-                    AppendCompilerOptions(cmd, taskData.compilerOptionsSPIRV);
+                    AppendCompilerOptions(cmd, taskData.compilerOptionsSPIRV, taskData.compilerType);
             }
 
             // Source file
@@ -1437,16 +1701,18 @@ static void ExeCompile()
 #ifdef _WIN32
             bool commandShellError = false;
 #else
-            bool commandShellError = (WIFEXITED(result) && WEXITSTATUS(result) == 127);
+            bool commandShellError = result != -1 && WIFEXITED(result) && WEXITSTATUS(result) == 127;
 #endif
 
             if (result == 0)
                 isSucceeded = true;
 
             // Retry if count > 0 and failed to execute child sub-process or command shell (posix only)
-            else if (g_TaskRetryCount > 0 && (childProcessError || commandShellError))
+            else if ((childProcessError || commandShellError) && TryReserveRetry())
                 willRetry = true;
         }
+        else
+            willRetry = TryReserveRetry();
 
         // Convert to headers if needed
         if (isSucceeded && (g_Options.header || (g_Options.headerBlob && taskData.combinedDefines.empty())))
@@ -1597,6 +1863,61 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     if (g_Options.platform == DXBC && (profile == "lib" || profile == "ms" || profile == "as"))
         return true;
 
+    const char* compilerAliasName = nullptr;
+    if (g_Options.platform == DXIL)
+        compilerAliasName = configLine.compilerDXIL;
+    else if (g_Options.platform == SPIRV)
+        compilerAliasName = configLine.compilerSPIRV;
+
+    const CompilerAlias* compilerAlias = nullptr;
+    if (compilerAliasName)
+    {
+        compilerAlias = FindCompilerAlias(compilerAliasName);
+        if (!compilerAlias)
+        {
+            Printf(RED "%s(%u,0): ERROR: Compiler alias '%s' is not registered!\n",
+                PathToString(g_Options.configFile).c_str(), lineIndex + 1, compilerAliasName);
+            return false;
+        }
+    }
+
+    CompilerType compilerType = compilerAlias ? compilerAlias->type : g_Options.compilerType;
+    if (compilerType == COMPILER_SLANG && g_Options.platform == SPIRV)
+    {
+        if (!GetSlangSpirvCapability(g_Options.vulkanVersion))
+        {
+            Printf(RED "%s(%u,0): ERROR: Unsupported value '%s' for --vulkanVersion and Slang! Only '1.0', '1.1', "
+                "'1.1spirv1.4', '1.2', '1.3' and '1.4' are supported.\n",
+                PathToString(g_Options.configFile).c_str(), lineIndex + 1, g_Options.vulkanVersion);
+            return false;
+        }
+
+        uint32_t minSpirvVersion = GetSlangProfileMinSpirvVersion(configLine.shaderModel);
+        uint32_t maxSpirvVersion = GetVulkanMaxSpirvVersion(g_Options.vulkanVersion);
+        if (minSpirvVersion > maxSpirvVersion)
+        {
+            Printf(RED "%s(%u,0): ERROR: Slang shader model '%s' requires SPIR-V %u.%u, which is not supported by Vulkan %s!\n",
+                PathToString(g_Options.configFile).c_str(), lineIndex + 1, configLine.shaderModel,
+                minSpirvVersion / 100, minSpirvVersion % 100, g_Options.vulkanVersion);
+            return false;
+        }
+    }
+
+    bool compilerAliasBuildSignatureChanged = false;
+    if (compilerAlias)
+    {
+        auto [signatureIt, inserted] = g_CompilerAliasBuildSignatures.try_emplace(compilerAlias->name);
+        BuildSignature& buildSignature = signatureIt->second;
+        if (inserted)
+        {
+            buildSignature.path = GetCompilerAliasBuildSignaturePath(compilerAlias->name);
+            buildSignature.value = GetCompilerBuildSignature(compilerAlias->path, compilerAlias->type);
+            buildSignature.changed = !IsBuildSignatureCurrent(buildSignature.path, buildSignature.value);
+        }
+
+        compilerAliasBuildSignatureChanged = buildSignature.changed;
+    }
+
     // Getting the sorted index of defines. While doing this, the value of defines are also get included in sorting problem
     // but it doesn't matter until two defines keys are identical which is not the case.
     vector<size_t> definesSortedIndices = ShaderMake::GetSortedConstantsIndices(configLine.defines);
@@ -1643,10 +1964,25 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     if (configLine.outputDir)
         outputDir /= configLine.outputDir;
 
+    // Reject output collisions before workers can concurrently overwrite the same file.
+    fs::path compilerOutputFile = outputDir / permutationName;
+    compilerOutputFile += g_OutputExt;
+    string outputKey = PathToString(fs::absolute(compilerOutputFile));
+#ifdef _WIN32
+    transform(outputKey.begin(), outputKey.end(), outputKey.begin(), [](char ch) { return (char)tolower((unsigned char)ch); });
+#endif
+    auto [outputIt, outputInserted] = g_OutputLines.emplace(outputKey, lineIndex + 1);
+    if (!outputInserted)
+    {
+        Printf(RED "%s(%u,0): ERROR: Output '%s' is already produced by line %u!\n",
+            PathToString(g_Options.configFile).c_str(), lineIndex + 1, outputKey.c_str(), outputIt->second);
+        return false;
+    }
+
     // Create intermediate output directories
-    bool force = g_Options.force;
+    bool force = g_Options.force || compilerAliasBuildSignatureChanged;
     fs::path endPath = outputDir / shaderName.parent_path();
-    if (g_Options.pdb)
+    if (g_Options.pdb && compilerType != COMPILER_SLANG)
         endPath /= PDB_DIR;
     if (endPath.string() != "" && !fs::exists(endPath))
     {
@@ -1741,9 +2077,16 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     taskData.entryPoint = configLine.entryPoint;
     taskData.profile = configLine.profile;
     taskData.shaderModel = configLine.shaderModel;
+    fs::path compilerPath = compilerAlias ? compilerAlias->path : fs::path(g_Options.compiler);
+    taskData.compiler = PathToString(fs::absolute(compilerPath));
+    taskData.compilerType = compilerType;
     taskData.combinedDefines = combinedDefines;
     taskData.outputFileWithoutExt = outputFileWithoutExt;
     taskData.defines = configLine.defines;
+    if (taskData.compilerType == COMPILER_SLANG && !HasDefine(g_Options.defines, "__SLANG__"))
+        AddImplicitDefine(taskData.defines, "__SLANG__");
+    if (g_Options.platform == SPIRV && !HasDefine(g_Options.defines, "__spirv__"))
+        AddImplicitDefine(taskData.defines, "__spirv__");
     taskData.compilerOptions = configLine.compilerOptions;
     taskData.compilerOptionsDXIL = configLine.compilerOptionsDXIL;
     taskData.compilerOptionsSPIRV = configLine.compilerOptionsSPIRV;
@@ -1905,21 +2248,6 @@ int32_t main(int32_t argc, const char** argv)
     g_Options.force |= buildSignatureChanged;
     bool buildSucceeded = true;
 
-    // Set envvar
-    char envBuf[BUF_SIZE];
-#ifdef _WIN32 // workaround for Windows
-    snprintf(envBuf, sizeof(envBuf), "COMPILER=\"%s\"", g_Options.compiler);
-
-    // Setup a directory where to look for the compiler first
-    fs::path compilerPath = fs::path(g_Options.compiler).parent_path();
-    SetDllDirectoryA(compilerPath.string().c_str());
-#else
-    snprintf(envBuf, sizeof(envBuf), "COMPILER=%s", g_Options.compiler);
-#endif
-
-    if (putenv(envBuf) != 0)
-        return 1;
-
     { // Gather shader permutations
         fs::file_time_type configTime = fs::last_write_time(g_Options.configFile);
 #if DEVMODE
@@ -1939,7 +2267,7 @@ int32_t main(int32_t argc, const char** argv)
             TrimConfigLine(line);
 
             // Skip an empty or commented line
-            if (line.empty() || line[0] == '\n' || (line[0] == '/' && line[1] == '/'))
+            if (line.empty() || line[0] == '\n' || (line.size() > 1 && line[0] == '/' && line[1] == '/'))
                 continue;
 
             // TODO: preprocessor supports "#ifdef MACRO / #if 1 / #if 0", "#else" and "#endif"
@@ -1950,7 +2278,7 @@ int32_t main(int32_t argc, const char** argv)
                 pos += line.substr(pos).find_first_not_of(' ');
 
                 string define = line.substr(pos);
-                bool state = blocks.back() && HasDefine(g_Options.defines, define.c_str());
+                bool state = blocks.back() && HasConfigDefine(define.c_str());
 
                 blocks.push_back(state);
             }
@@ -1984,26 +2312,40 @@ int32_t main(int32_t argc, const char** argv)
     if (buildSignatureNeedsWrite && !InvalidateBuildSignature(buildSignaturePath))
         return 1;
 
+    for (const auto& [name, compilerBuildSignature] : g_CompilerAliasBuildSignatures)
+    {
+        UNUSED(name);
+        if (compilerBuildSignature.changed && !InvalidateBuildSignature(compilerBuildSignature.path))
+            return 1;
+    }
+
+    if (g_Options.pdb && any_of(g_TaskData.begin(), g_TaskData.end(), [](const TaskData& taskData) { return taskData.compilerType == COMPILER_SLANG; }))
+        Printf(YELLOW "WARNING: ShaderMake does not support separate PDB output with Slang; --PDB enables debug information in the shader binary.\n");
+
     // Process tasks
     if (!g_TaskData.empty())
     {
-        Printf(WHITE "Compiling shaders using: %s\n", g_Options.compiler);
+        Printf(WHITE "Compiling shaders using default compiler: %s\n", g_Options.compiler);
+        for (const CompilerAlias& compilerAlias : g_Options.compilerAliases)
+            Printf(WHITE "Compiler alias %s: %s\n", compilerAlias.name.c_str(), PathToString(compilerAlias.path).c_str());
 
         g_OriginalTaskCount = (uint32_t)g_TaskData.size();
         g_ProcessedTaskCount = 0;
         g_FailedTaskCount = 0;
 
-        // Retry limit for compilation task sub-process failures that can occur when threading
+        // Global retry budget for transient compilation subprocess launch failures.
         g_TaskRetryCount = g_Options.retryCount;
 
-        uint32_t threadsNum = max(g_Options.serial ? 1 : thread::hardware_concurrency(), 1u);
+        uint32_t availableThreadNum = g_Options.jobs > 0 ? (uint32_t)g_Options.jobs : max(thread::hardware_concurrency(), 1u);
+        uint32_t threadsNum = g_Options.serial ? 1 : min(availableThreadNum, g_OriginalTaskCount);
 
-        vector<thread> threads(threadsNum);
+        vector<thread> threads;
+        threads.reserve(threadsNum);
         for (uint32_t i = 0; i < threadsNum; i++)
-            threads[i] = thread(ExeCompile);
+            threads.emplace_back(ExeCompile);
 
-        for (uint32_t i = 0; i < threadsNum; i++)
-            threads[i].join();
+        for (thread& worker : threads)
+            worker.join();
 
         // If a fatal error or a termination request happened, don't proceed to the blob building.
         if (g_Terminate)
@@ -2071,8 +2413,18 @@ int32_t main(int32_t argc, const char** argv)
             Printf(WHITE "%u task(s) completed successfully (elapsed time %.2f ms)\n", g_OriginalTaskCount, ms);
     }
 
-    if (!g_Terminate && !g_FailedTaskCount && buildSucceeded && buildSignatureNeedsWrite && !WriteBuildSignature(buildSignaturePath, buildSignature))
-        return 1;
+    if (!g_Terminate && !g_FailedTaskCount && buildSucceeded)
+    {
+        if (buildSignatureNeedsWrite && !WriteBuildSignature(buildSignaturePath, buildSignature))
+            return 1;
+
+        for (const auto& [name, compilerBuildSignature] : g_CompilerAliasBuildSignatures)
+        {
+            UNUSED(name);
+            if (compilerBuildSignature.changed && !WriteBuildSignature(compilerBuildSignature.path, compilerBuildSignature.value))
+                return 1;
+        }
+    }
 
     return (g_Terminate || g_FailedTaskCount || !buildSucceeded) ? 1 : 0;
 }
