@@ -20,60 +20,63 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-#include "argparse.h"
 #include "ShaderBlob.h"
+#include "argparse.h"
 
 #include <algorithm>
-#include <sstream>
-#include <fstream>
-#include <map>
-#include <vector>
 #include <array>
-#include <list>
-#include <regex>
-#include <thread>
-#include <mutex>
-#include <filesystem>
 #include <atomic>
-#include <cstdio>
+#include <cctype>
+#include <cerrno>
 #include <csignal>
 #include <cstdarg>
-#include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
-#include <cerrno>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <list>
+#include <map>
+#include <mutex>
+#include <regex>
+#include <sstream>
+#include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #ifdef _WIN32
-    #include <windows.h>
+#    include <windows.h>
 #else
-    #include <unistd.h>
-    #include <limits.h>
-    #include <sys/wait.h>
+#    include <limits.h>
+#    include <sys/wait.h>
+#    include <time.h>
+#    include <unistd.h>
 #endif
 
 using namespace std;
 namespace fs = filesystem;
 
-#define _L(x)  __L(x)
-#define __L(x) L ## x
-#define UNUSED(x) ((void)(x))
+#define _L(x)       __L(x)
+#define __L(x)      L##x
+#define UNUSED(x)   ((void)(x))
 #define COUNT_OF(a) (sizeof(a) / sizeof(a[0]))
 
 #define USE_GLOBAL_OPTIMIZATION_LEVEL 0xFF
-#define SPIRV_SPACES_NUM 8
-#define PDB_DIR "PDB"
-#define BUF_SIZE 2048 // max line length
-#define DEVMODE 1 // 1 forces recompilation if EXE changes
+#define SPIRV_SPACES_NUM              8
+#define PDB_DIR                       "PDB"
+#define BUF_SIZE                      2048 // max line length
+#define DEVMODE                       1    // 1 forces recompilation if EXE changes
 
 #ifdef _MSC_VER
-    #define popen _popen
-    #define pclose _pclose
+#    define popen  _popen
+#    define pclose _pclose
 #endif
 
-enum Platform : uint8_t
-{
+enum Platform : uint8_t {
     DXBC,
     DXIL,
     SPIRV,
@@ -81,22 +84,19 @@ enum Platform : uint8_t
     PLATFORMS_NUM
 };
 
-enum CompilerType : uint8_t
-{
+enum CompilerType : uint8_t {
     COMPILER_FXC,
     COMPILER_DXC,
     COMPILER_SLANG,
 };
 
-struct CompilerAlias
-{
+struct CompilerAlias {
     string name;
     fs::path path;
     CompilerType type = COMPILER_DXC;
 };
 
-struct Options
-{
+struct Options {
     vector<fs::path> includeDirs;
     vector<fs::path> relaxedIncludes;
     vector<string> defines;
@@ -148,12 +148,12 @@ struct Options
 
     bool Parse(int32_t argc, const char** argv);
 
-    bool IsBlob() const
-    { return binaryBlob || headerBlob; }
+    bool IsBlob() const {
+        return binaryBlob || headerBlob;
+    }
 };
 
-struct ConfigLine
-{
+struct ConfigLine {
     vector<string> defines;
     vector<string> compilerOptions;
     vector<string> compilerOptionsDXIL;
@@ -173,8 +173,7 @@ struct ConfigLine
     bool Parse(int32_t argc, const char** argv);
 };
 
-struct TaskData
-{
+struct TaskData {
     vector<string> defines;
     vector<string> compilerOptions;
     vector<string> compilerOptionsDXIL;
@@ -191,14 +190,12 @@ struct TaskData
     bool noRegShifts = false;
 };
 
-struct BlobEntry
-{
+struct BlobEntry {
     string permutationFileWithoutExt;
     string combinedDefines;
 };
 
-struct BuildSignature
-{
+struct BuildSignature {
     fs::path path;
     string value;
     bool changed = false;
@@ -239,17 +236,17 @@ std::array<const char*, 3> g_PlatformSlangTargets = {
 };
 
 #if 1
-    #define RED "\x1b[31m"
-    #define GRAY "\x1b[90m"
-    #define WHITE "\x1b[0m"
-    #define GREEN "\x1b[32m"
-    #define YELLOW "\x1b[33m"
+#    define RED    "\x1b[31m"
+#    define GRAY   "\x1b[90m"
+#    define WHITE  "\x1b[0m"
+#    define GREEN  "\x1b[32m"
+#    define YELLOW "\x1b[33m"
 #else
-    #define RED ""
-    #define GRAY ""
-    #define WHITE ""
-    #define GREEN ""
-    #define YELLOW ""
+#    define RED    ""
+#    define GRAY   ""
+#    define WHITE  ""
+#    define GREEN  ""
+#    define YELLOW ""
 #endif
 
 /*
@@ -265,21 +262,21 @@ Naming convention:
 // MISC
 //=====================================================================================================================
 
-static inline uint32_t HashToUint(size_t hash)
-{ return uint32_t(hash) ^ (uint32_t(hash >> 32)); }
+static inline uint32_t HashToUint(size_t hash) {
+    return uint32_t(hash) ^ (uint32_t(hash >> 32));
+}
 
-static string PathToString(fs::path path)
-{ return path.lexically_normal().make_preferred().string(); }
+static string PathToString(fs::path path) {
+    return path.lexically_normal().make_preferred().string();
+}
 
-static fs::path RemoveLeadingDotDots(const fs::path& path)
-{
+static fs::path RemoveLeadingDotDots(const fs::path& path) {
     auto it = path.begin();
     while (it != path.end() && *it == "..")
         ++it;
 
     fs::path result;
-    while (it != path.end())
-    {
+    while (it != path.end()) {
         result = result / *it;
         ++it;
     }
@@ -287,26 +284,24 @@ static fs::path RemoveLeadingDotDots(const fs::path& path)
     return result;
 }
 
-static inline bool IsSpace(char ch)
-{ return strchr(" \t\r\n", ch) != nullptr; }
+static inline bool IsSpace(char ch) {
+    return strchr(" \t\r\n", ch) != nullptr;
+}
 
-static bool IsSlangCompiler(const char* compiler)
-{
+static bool IsSlangCompiler(const char* compiler) {
     string name = fs::path(compiler).filename().string();
     transform(name.begin(), name.end(), name.begin(), [](char ch) { return (char)tolower((unsigned char)ch); });
 
     return name == "slangc" || name == "slangc.exe";
 }
 
-static string ToUpper(string value)
-{
+static string ToUpper(string value) {
     transform(value.begin(), value.end(), value.begin(), [](char ch) { return (char)toupper((unsigned char)ch); });
 
     return value;
 }
 
-static bool GetCompilerType(const string& name, CompilerType& type)
-{
+static bool GetCompilerType(const string& name, CompilerType& type) {
     if (name == "DXC")
         type = COMPILER_DXC;
     else if (name == "SLANG")
@@ -317,11 +312,9 @@ static bool GetCompilerType(const string& name, CompilerType& type)
     return true;
 }
 
-static const CompilerAlias* FindCompilerAlias(const char* name)
-{
+static const CompilerAlias* FindCompilerAlias(const char* name) {
     string normalizedName = ToUpper(name);
-    for (const CompilerAlias& compilerAlias : g_Options.compilerAliases)
-    {
+    for (const CompilerAlias& compilerAlias : g_Options.compilerAliases) {
         if (compilerAlias.name == normalizedName)
             return &compilerAlias;
     }
@@ -329,11 +322,9 @@ static const CompilerAlias* FindCompilerAlias(const char* name)
     return nullptr;
 }
 
-static bool HasDefine(const vector<string>& defines, const char* name)
-{
+static bool HasDefine(const vector<string>& defines, const char* name) {
     size_t nameLength = strlen(name);
-    for (const string& define : defines)
-    {
+    for (const string& define : defines) {
         if (define.compare(0, nameLength, name) == 0 && (define.size() == nameLength || define[nameLength] == '='))
             return true;
     }
@@ -341,14 +332,12 @@ static bool HasDefine(const vector<string>& defines, const char* name)
     return false;
 }
 
-static void AddImplicitDefine(vector<string>& defines, const char* name)
-{
+static void AddImplicitDefine(vector<string>& defines, const char* name) {
     if (!HasDefine(defines, name))
         defines.push_back(name);
 }
 
-static bool HasConfigDefine(const char* name)
-{
+static bool HasConfigDefine(const char* name) {
     if (HasDefine(g_Options.defines, name))
         return true;
     if (strcmp(name, "__SLANG__") == 0)
@@ -359,33 +348,28 @@ static bool HasConfigDefine(const char* name)
     return false;
 }
 
-static inline bool IsCompilerOptionBoundary(const string& options, size_t pos)
-{ return pos == options.size() || IsSpace(options[pos]); }
+static inline bool IsCompilerOptionBoundary(const string& options, size_t pos) {
+    return pos == options.size() || IsSpace(options[pos]);
+}
 
-static void ReplaceCompilerOption(string& options, const char* from, const char* to)
-{
+static void ReplaceCompilerOption(string& options, const char* from, const char* to) {
     size_t fromLength = strlen(from);
     size_t pos = 0;
-    while ((pos = options.find(from, pos)) != string::npos)
-    {
+    while ((pos = options.find(from, pos)) != string::npos) {
         bool isStart = pos == 0 || IsSpace(options[pos - 1]);
         bool isEnd = IsCompilerOptionBoundary(options, pos + fromLength);
-        if (isStart && isEnd)
-        {
+        if (isStart && isEnd) {
             options.replace(pos, fromLength, to);
             pos += strlen(to);
-        }
-        else
+        } else
             pos += fromLength;
     }
 }
 
-static bool HasCompilerOption(const string& options, const char* option)
-{
+static bool HasCompilerOption(const string& options, const char* option) {
     size_t optionLength = strlen(option);
     size_t pos = 0;
-    while ((pos = options.find(option, pos)) != string::npos)
-    {
+    while ((pos = options.find(option, pos)) != string::npos) {
         bool isStart = pos == 0 || IsSpace(options[pos - 1]);
         bool isEnd = IsCompilerOptionBoundary(options, pos + optionLength);
         if (isStart && isEnd)
@@ -397,15 +381,12 @@ static bool HasCompilerOption(const string& options, const char* option)
     return false;
 }
 
-static void TranslateSlangSpirvExtensions(string& options)
-{
+static void TranslateSlangSpirvExtensions(string& options) {
     static const char* prefix = "-fspv-extension=";
     const size_t prefixLength = strlen(prefix);
     size_t pos = 0;
-    while ((pos = options.find(prefix, pos)) != string::npos)
-    {
-        if (pos != 0 && !IsSpace(options[pos - 1]))
-        {
+    while ((pos = options.find(prefix, pos)) != string::npos) {
+        if (pos != 0 && !IsSpace(options[pos - 1])) {
             pos += prefixLength;
             continue;
         }
@@ -415,50 +396,40 @@ static void TranslateSlangSpirvExtensions(string& options)
         string extension = options.substr(extensionPos, end - extensionPos);
         if (extension == "SPV_EXT_mesh_shader")
             options.erase(pos, end - pos);
-        else if (extension.compare(0, 4, "SPV_") == 0)
-        {
+        else if (extension.compare(0, 4, "SPV_") == 0) {
             string replacement = "-capability " + extension;
             options.replace(pos, end - pos, replacement);
             pos += replacement.size();
-        }
-        else
+        } else
             pos = end;
     }
 }
 
-static string TranslateCompilerOptions(const string& options, CompilerType compilerType)
-{
+static string TranslateCompilerOptions(const string& options, CompilerType compilerType) {
     if (g_Options.platform != SPIRV)
         return options;
 
     string translatedOptions = options;
-    if (compilerType == COMPILER_SLANG)
-    {
+    if (compilerType == COMPILER_SLANG) {
         TranslateSlangSpirvExtensions(translatedOptions);
         ReplaceCompilerOption(translatedOptions, "-fspv-use-descriptor-heap", "-capability spvDescriptorHeapEXT -spirv-unified-descriptor-heap-stride");
         ReplaceCompilerOption(translatedOptions, "-fspv-use-unknown-image-format", "-default-image-format-unknown");
-    }
-    else if (HasCompilerOption(translatedOptions, "-fspv-use-descriptor-heap") &&
-        !HasCompilerOption(translatedOptions, "-fspv-extension=SPV_EXT_descriptor_heap"))
-    {
+    } else if (HasCompilerOption(translatedOptions, "-fspv-use-descriptor-heap") && !HasCompilerOption(translatedOptions, "-fspv-extension=SPV_EXT_descriptor_heap")) {
         translatedOptions += " -fspv-extension=SPV_EXT_descriptor_heap";
     }
 
     return translatedOptions;
 }
 
-static void AppendCompilerOptions(ostringstream& cmd, const vector<string>& compilerOptions, CompilerType compilerType)
-{
-    for (const string& options : compilerOptions)
-    {
+static void AppendCompilerOptions(ostringstream& cmd, const vector<string>& compilerOptions, CompilerType compilerType) {
+    for (const string& options : compilerOptions) {
         string translatedOptions = TranslateCompilerOptions(options, compilerType);
         if (translatedOptions.find_first_not_of(" \t\r\n") != string::npos)
             cmd << " " << translatedOptions;
     }
 }
 
-static const char* GetSlangSpirvCapability(const char* vulkanVersion)
-{
+static const char* GetSlangSpirvCapability(const char* vulkanVersion) {
     if (strcmp(vulkanVersion, "1.0") == 0)
         return "spirv_1_0";
     if (strcmp(vulkanVersion, "1.1") == 0)
@@ -473,25 +444,23 @@ static const char* GetSlangSpirvCapability(const char* vulkanVersion)
     return nullptr;
 }
 
-static void AppendBuildSignatureValue(ostringstream& signature, const char* name, const string& value)
-{ signature << name << '=' << value.size() << ':' << value << '\n'; }
+static void AppendBuildSignatureValue(ostringstream& signature, const char* name, const string& value) {
+    signature << name << '=' << value.size() << ':' << value << '\n';
+}
 
-static void AppendBuildSignatureValues(ostringstream& signature, const char* name, const vector<string>& values)
-{
+static void AppendBuildSignatureValues(ostringstream& signature, const char* name, const vector<string>& values) {
     signature << name << ".size=" << values.size() << '\n';
     for (const string& value : values)
         AppendBuildSignatureValue(signature, name, value);
 }
 
-static void AppendBuildSignaturePaths(ostringstream& signature, const char* name, const vector<fs::path>& paths)
-{
+static void AppendBuildSignaturePaths(ostringstream& signature, const char* name, const vector<fs::path>& paths) {
     signature << name << ".size=" << paths.size() << '\n';
     for (const fs::path& path : paths)
         AppendBuildSignatureValue(signature, name, PathToString(path));
 }
 
-static void AppendCompilerBuildSignature(ostringstream& signature, const fs::path& compilerPath, CompilerType compilerType)
-{
+static void AppendCompilerBuildSignature(ostringstream& signature, const fs::path& compilerPath, CompilerType compilerType) {
     fs::path path = fs::absolute(compilerPath).lexically_normal();
     AppendBuildSignatureValue(signature, "compiler", PathToString(path));
     AppendBuildSignatureValue(signature, "compilerType", to_string(compilerType));
@@ -502,31 +471,25 @@ static void AppendCompilerBuildSignature(ostringstream& signature, const fs::pat
     static const char* dxcSidecars[] = {"dxcompiler.dll", "dxil.dll"};
     static const char* slangSidecars[] = {
         "gfx.dll", "slang-compiler.dll", "slang-glsl-module.dll", "slang-glslang.dll",
-        "slang-llvm.dll", "slang-rt.dll", "slang.dll"
-    };
+        "slang-llvm.dll", "slang-rt.dll", "slang.dll"};
 #elif defined(__APPLE__)
     static const char* dxcSidecars[] = {"libdxcompiler.dylib", "libdxil.dylib"};
     static const char* slangSidecars[] = {
         "libgfx.dylib", "libslang-compiler.dylib", "libslang-glsl-module.dylib", "libslang-glslang.dylib",
-        "libslang-llvm.dylib", "libslang-rt.dylib", "libslang.dylib"
-    };
+        "libslang-llvm.dylib", "libslang-rt.dylib", "libslang.dylib"};
 #else
     static const char* dxcSidecars[] = {"libdxcompiler.so", "libdxil.so"};
     static const char* slangSidecars[] = {
         "libgfx.so", "libslang-compiler.so", "libslang-glsl-module.so", "libslang-glslang.so",
-        "libslang-llvm.so", "libslang-rt.so", "libslang.so"
-    };
+        "libslang-llvm.so", "libslang-rt.so", "libslang.so"};
 #endif
 
     const char* const* sidecars = nullptr;
     size_t sidecarNum = 0;
-    if (compilerType == COMPILER_DXC)
-    {
+    if (compilerType == COMPILER_DXC) {
         sidecars = dxcSidecars;
         sidecarNum = COUNT_OF(dxcSidecars);
-    }
-    else if (compilerType == COMPILER_SLANG)
-    {
+    } else if (compilerType == COMPILER_SLANG) {
         sidecars = slangSidecars;
         sidecarNum = COUNT_OF(slangSidecars);
     }
@@ -537,10 +500,8 @@ static void AppendCompilerBuildSignature(ostringstream& signature, const fs::pat
         path.parent_path().parent_path() / "lib64",
     };
 
-    for (const fs::path& sidecarDir : sidecarDirs)
-    {
-        for (size_t i = 0; i < sidecarNum; i++)
-        {
+    for (const fs::path& sidecarDir : sidecarDirs) {
+        for (size_t i = 0; i < sidecarNum; i++) {
             fs::path sidecarPath = sidecarDir / sidecars[i];
             if (!fs::exists(sidecarPath))
                 continue;
@@ -552,8 +513,7 @@ static void AppendCompilerBuildSignature(ostringstream& signature, const fs::pat
     }
 }
 
-static string GetCompilerBuildSignature(const fs::path& compilerPath, CompilerType compilerType)
-{
+static string GetCompilerBuildSignature(const fs::path& compilerPath, CompilerType compilerType) {
     ostringstream signature;
     AppendBuildSignatureValue(signature, "version", "1");
     AppendCompilerBuildSignature(signature, compilerPath, compilerType);
@@ -561,8 +521,7 @@ static string GetCompilerBuildSignature(const fs::path& compilerPath, CompilerTy
     return signature.str();
 }
 
-static string GetBuildSignature()
-{
+static string GetBuildSignature() {
     fs::path outputPath = fs::absolute(g_Options.outputDir).lexically_normal();
     ostringstream signature;
 
@@ -589,8 +548,7 @@ static string GetBuildSignature()
     AppendBuildSignatureValues(signature, "define", g_Options.defines);
     AppendBuildSignatureValues(signature, "compilerOptions", g_Options.compilerOptions);
 
-    if (g_Options.platform == SPIRV)
-    {
+    if (g_Options.platform == SPIRV) {
         AppendBuildSignatureValue(signature, "vulkanVersion", g_Options.vulkanVersion);
         AppendBuildSignatureValue(signature, "vulkanMemoryLayout", g_Options.vulkanMemoryLayout ? g_Options.vulkanMemoryLayout : "");
         AppendBuildSignatureValue(signature, "sRegShift", to_string(g_Options.sRegShift));
@@ -604,14 +562,15 @@ static string GetBuildSignature()
     return signature.str();
 }
 
-static fs::path GetBuildSignaturePath()
-{ return fs::path(g_Options.outputDir) / (".ShaderMake." + string(g_Options.platformName) + ".signature"); }
+static fs::path GetBuildSignaturePath() {
+    return fs::path(g_Options.outputDir) / (".ShaderMake." + string(g_Options.platformName) + ".signature");
+}
 
-static fs::path GetCompilerAliasBuildSignaturePath(const string& name)
-{ return fs::path(g_Options.outputDir) / (".ShaderMake." + string(g_Options.platformName) + "." + name + ".compiler.signature"); }
+static fs::path GetCompilerAliasBuildSignaturePath(const string& name) {
+    return fs::path(g_Options.outputDir) / (".ShaderMake." + string(g_Options.platformName) + "." + name + ".compiler.signature");
+}
 
-static bool IsBuildSignatureCurrent(const fs::path& path, const string& signature)
-{
+static bool IsBuildSignatureCurrent(const fs::path& path, const string& signature) {
     ifstream stream(path, ios::binary);
     if (!stream)
         return false;
@@ -624,12 +583,10 @@ static bool IsBuildSignatureCurrent(const fs::path& path, const string& signatur
 
 static void Printf(const char* format, ...);
 
-static bool InvalidateBuildSignature(const fs::path& path)
-{
+static bool InvalidateBuildSignature(const fs::path& path) {
     error_code errorCode;
     bool isRemoved = fs::remove(path, errorCode);
-    if (!isRemoved && errorCode)
-    {
+    if (!isRemoved && errorCode) {
         Printf(RED "ERROR: Can't invalidate build signature '%s'!\n", PathToString(path).c_str());
         return false;
     }
@@ -637,20 +594,17 @@ static bool InvalidateBuildSignature(const fs::path& path)
     return true;
 }
 
-static bool WriteBuildSignature(const fs::path& path, const string& signature)
-{
+static bool WriteBuildSignature(const fs::path& path, const string& signature) {
     fs::create_directories(path.parent_path());
 
     ofstream stream(path, ios::binary | ios::trunc);
-    if (!stream)
-    {
+    if (!stream) {
         Printf(RED "ERROR: Can't open build signature '%s' for writing!\n", PathToString(path).c_str());
         return false;
     }
 
     stream.write(signature.data(), signature.size());
-    if (!stream)
-    {
+    if (!stream) {
         Printf(RED "ERROR: Can't write build signature '%s'!\n", PathToString(path).c_str());
         return false;
     }
@@ -658,19 +612,18 @@ static bool WriteBuildSignature(const fs::path& path, const string& signature)
     return true;
 }
 
-static inline bool HasRepeatingSpace(char a, char b)
-{ return (a == b) && a == ' '; }
+static inline bool HasRepeatingSpace(char a, char b) {
+    return (a == b) && a == ' ';
+}
 
-static string EscapePath(const string& s)
-{
+static string EscapePath(const string& s) {
     if (s.find(' ') != string::npos)
         return "\"" + s + "\"";
 
     return s;
 }
 
-static void TrimConfigLine(string& s)
-{
+static void TrimConfigLine(string& s) {
     // Remove leading whitespace
     s.erase(s.begin(), find_if(s.begin(), s.end(), [](char ch) { return !IsSpace(ch); }));
 
@@ -685,19 +638,16 @@ static void TrimConfigLine(string& s)
     s.erase(newEnd, s.end());
 }
 
-static void TokenizeConfigLine(char* in, vector<const char*>& tokens)
-{
+static void TokenizeConfigLine(char* in, vector<const char*>& tokens) {
     char* out = in;
     char* token = out;
 
     // Some magic to correctly tokenize spaces in ""
     bool isString = false;
-    while (*in)
-    {
+    while (*in) {
         if (*in == '"')
             isString = !isString;
-        else if (*in == ' ' && !isString)
-        {
+        else if (*in == ' ' && !isString) {
             *in = '\0';
             if (*token)
                 tokens.push_back(token);
@@ -715,8 +665,7 @@ static void TokenizeConfigLine(char* in, vector<const char*>& tokens)
         tokens.push_back(token);
 }
 
-static uint32_t GetFileLength(FILE* stream)
-{
+static uint32_t GetFileLength(FILE* stream) {
     /*
     TODO: can be done more efficiently
     Win:
@@ -740,22 +689,20 @@ static uint32_t GetFileLength(FILE* stream)
     return len;
 }
 
-static void Printf(const char* format, ...)
-{
+static void Printf(const char* format, ...) {
     va_list argptr;
     va_start(argptr, format);
 
     // Remove embedded colors if colorization is off
     char fixedFormat[BUF_SIZE]; // TODO: let's assume that we always fit
-    if (!g_Options.colorize)
-    {
+    if (!g_Options.colorize) {
         const char* in = format;
         char* out = fixedFormat;
 
-        while (*in)
-        {
+        while (*in) {
             if (*in == '\x1b')
-                while( *in++ != 'm' );
+                while (*in++ != 'm')
+                    ;
 
             *out++ = *in++;
         }
@@ -776,8 +723,7 @@ static void Printf(const char* format, ...)
     fflush(stdout);
 }
 
-static string GetShaderName(const fs::path& path)
-{
+static string GetShaderName(const fs::path& path) {
     string name = path.filename().string();
     replace(name.begin(), name.end(), '.', '_');
     name += "_" + string(g_PlatformExts[g_Options.platform] + 1);
@@ -786,35 +732,28 @@ static string GetShaderName(const fs::path& path)
 }
 
 // A class that is used to write a code blob as binary or C-string
-class DataOutputContext
-{
+class DataOutputContext {
 public:
     FILE* stream = nullptr;
 
-    DataOutputContext(const char* file, bool textMode)
-    {
-        stream = fopen(file, textMode ? "w": "wb");
+    DataOutputContext(const char* file, bool textMode) {
+        stream = fopen(file, textMode ? "w" : "wb");
         if (!stream)
             Printf(RED "ERROR: Can't open file '%s' for writing!\n", file);
     }
 
-    ~DataOutputContext()
-    {
-        if (stream)
-        {
+    ~DataOutputContext() {
+        if (stream) {
             fclose(stream);
             stream = nullptr;
         }
     }
 
-    bool WriteDataAsText(const void* data, size_t size)
-    {
-        for (size_t i = 0; i < size; i++)
-        {
+    bool WriteDataAsText(const void* data, size_t size) {
+        for (size_t i = 0; i < size; i++) {
             uint8_t value = ((const uint8_t*)data)[i];
 
-            if (m_lineLength > 128)
-            {
+            if (m_lineLength > 128) {
                 fprintf(stream, "\n    ");
                 m_lineLength = 0;
             }
@@ -832,17 +771,16 @@ public:
         return true;
     }
 
-    void WriteTextPreamble(const char* shaderName, const std::string& combinedDefines)
-    {
+    void WriteTextPreamble(const char* shaderName, const std::string& combinedDefines) {
         fprintf(stream, "// {%s}\n", combinedDefines.c_str());
         fprintf(stream, "const uint8_t %s[] = {", shaderName);
     }
 
-    void WriteTextEpilog()
-    { fprintf(stream, "\n};\n"); }
+    void WriteTextEpilog() {
+        fprintf(stream, "\n};\n");
+    }
 
-    bool WriteDataAsBinary(const void* data, size_t size)
-    {
+    bool WriteDataAsBinary(const void* data, size_t size) {
         if (size == 0)
             return true;
 
@@ -850,46 +788,39 @@ public:
     }
 
     // For use as a callback in "WriteFileHeader" and "WritePermutation" functions
-    static bool WriteDataAsTextCallback(const void* data, size_t size, void* context)
-    { return ((DataOutputContext*)context)->WriteDataAsText(data, size); }
+    static bool WriteDataAsTextCallback(const void* data, size_t size, void* context) {
+        return ((DataOutputContext*)context)->WriteDataAsText(data, size);
+    }
 
-    static bool WriteDataAsBinaryCallback(const void* data, size_t size, void* context)
-    { return ((DataOutputContext*)context)->WriteDataAsBinary(data, size); }
+    static bool WriteDataAsBinaryCallback(const void* data, size_t size, void* context) {
+        return ((DataOutputContext*)context)->WriteDataAsBinary(data, size);
+    }
 
 private:
     uint32_t m_lineLength = 129;
 };
 
-static void UpdateProgress(TaskData& taskData, bool isSucceeded, bool willRetry, const char* message)
-{
+static void UpdateProgress(TaskData& taskData, bool isSucceeded, bool willRetry, const char* message) {
     // IMPORTANT: do not split into several "Printf" calls because multi-threading access to the console can mess up the order
-    if (isSucceeded)
-    {
+    if (isSucceeded) {
         float progress = 100.0f * float(++g_ProcessedTaskCount) / float(g_OriginalTaskCount);
 
-        if (message && *message != '\0')
-        {
+        if (message && *message != '\0') {
             Printf(YELLOW "(%5.1f%%) %s %s %s {%s} {%s}\n%s",
                 progress, g_Options.projectName, g_Options.platformName,
                 taskData.source.c_str(),
                 taskData.entryPoint.c_str(),
                 taskData.combinedDefines.c_str(),
                 message);
-        }
-        else
-        {
-            if (g_Options.compactProgress)
-            {
+        } else {
+            if (g_Options.compactProgress) {
                 uint32_t progressSnapped = (uint32_t(progress + 0.5f) / 10) * 10;
                 lock_guard<mutex> guard(g_ProgressMutex);
-                if (progressSnapped > g_PrevProgress)
-                {
+                if (progressSnapped > g_PrevProgress) {
                     Printf(GREEN "(%3u%%)" GRAY " %s %s\n", progressSnapped, g_Options.projectName, g_Options.platformName);
                     g_PrevProgress = progressSnapped;
                 }
-            }
-            else
-            {
+            } else {
                 Printf(GREEN "(%5.1f%%)" GRAY " %s %s" WHITE " %s" GRAY " {%s}" WHITE " {%s}\n",
                     progress, g_Options.projectName, g_Options.platformName,
                     taskData.source.c_str(),
@@ -897,12 +828,9 @@ static void UpdateProgress(TaskData& taskData, bool isSucceeded, bool willRetry,
                     taskData.combinedDefines.c_str());
             }
         }
-    }
-    else
-    {
+    } else {
         // If retrying, requeue the task and try again without counting failure or terminating.
-        if (willRetry)
-        {
+        if (willRetry) {
             Printf(YELLOW "( RETRY-QUEUED ) %s %s %s {%s} {%s}\n",
                 g_Options.projectName, g_Options.platformName,
                 taskData.source.c_str(),
@@ -911,15 +839,13 @@ static void UpdateProgress(TaskData& taskData, bool isSucceeded, bool willRetry,
 
             lock_guard<mutex> guard(g_TaskMutex);
             g_TaskData.push_back(std::move(taskData));
-        }
-        else
-        {
+        } else {
             Printf(RED "( FAIL ) %s %s %s {%s} {%s}\n%s",
-                   g_Options.projectName, g_Options.platformName,
-                   taskData.source.c_str(),
-                   taskData.entryPoint.c_str(),
-                   taskData.combinedDefines.c_str(),
-                   message ? message : "<no message text>!\n");
+                g_Options.projectName, g_Options.platformName,
+                taskData.source.c_str(),
+                taskData.entryPoint.c_str(),
+                taskData.combinedDefines.c_str(),
+                message ? message : "<no message text>!\n");
 
             if (!g_Options.continueOnError)
                 g_Terminate = true;
@@ -935,11 +861,11 @@ static void UpdateProgress(TaskData& taskData, bool isSucceeded, bool willRetry,
 
 double g_TicksToMilliseconds;
 
-static double Timer_ConvertTicksToMilliseconds(uint64_t ticks)
-{ return (double)ticks * g_TicksToMilliseconds; }
+static double Timer_ConvertTicksToMilliseconds(uint64_t ticks) {
+    return (double)ticks * g_TicksToMilliseconds;
+}
 
-static void Timer_Init()
-{
+static void Timer_Init() {
 #ifdef _WIN32
     uint64_t ticksPerSecond = 1;
     QueryPerformanceFrequency((LARGE_INTEGER*)&ticksPerSecond);
@@ -950,8 +876,7 @@ static void Timer_Init()
 #endif
 }
 
-static uint64_t Timer_GetTicks()
-{
+static uint64_t Timer_GetTicks() {
 #ifdef _WIN32
     uint64_t ticks;
     QueryPerformanceCounter((LARGE_INTEGER*)&ticks);
@@ -970,8 +895,7 @@ static uint64_t Timer_GetTicks()
 //=====================================================================================================================
 
 // Shader model in major_minor form for DXC/Slang profiles (e.g. 6_5, 6_10); each part is 1-4 decimal digits.
-static bool ParseShaderModelVersion(const char* sm, uint32_t& outMajor, uint32_t& outMinor)
-{
+static bool ParseShaderModelVersion(const char* sm, uint32_t& outMajor, uint32_t& outMinor) {
     if (!sm || !sm[0])
         return false;
 
@@ -987,16 +911,14 @@ static bool ParseShaderModelVersion(const char* sm, uint32_t& outMajor, uint32_t
         return false;
 
     uint32_t major = 0;
-    for (const char* p = sm; p < underscore; ++p)
-    {
+    for (const char* p = sm; p < underscore; ++p) {
         if (*p < '0' || *p > '9')
             return false;
         major = major * 10 + uint32_t(*p - '0');
     }
 
     uint32_t minor = 0;
-    for (const char* p = underscore + 1; *p; ++p)
-    {
+    for (const char* p = underscore + 1; *p; ++p) {
         if (*p < '0' || *p > '9')
             return false;
         minor = minor * 10 + uint32_t(*p - '0');
@@ -1007,8 +929,7 @@ static bool ParseShaderModelVersion(const char* sm, uint32_t& outMajor, uint32_t
     return true;
 }
 
-static uint32_t GetSlangProfileMinSpirvVersion(const char* shaderModel)
-{
+static uint32_t GetSlangProfileMinSpirvVersion(const char* shaderModel) {
     uint32_t major = 0;
     uint32_t minor = 0;
     if (!ParseShaderModelVersion(shaderModel, major, minor) || major < 6)
@@ -1023,8 +944,7 @@ static uint32_t GetSlangProfileMinSpirvVersion(const char* shaderModel)
     return 106;
 }
 
-static uint32_t GetVulkanMaxSpirvVersion(const char* vulkanVersion)
-{
+static uint32_t GetVulkanMaxSpirvVersion(const char* vulkanVersion) {
     if (strcmp(vulkanVersion, "1.0") == 0)
         return 100;
     if (strcmp(vulkanVersion, "1.1") == 0)
@@ -1037,26 +957,43 @@ static uint32_t GetVulkanMaxSpirvVersion(const char* vulkanVersion)
     return 106;
 }
 
-static int32_t AddInclude(struct argparse* self, const struct argparse_option* option)
-{ ((Options*)(option->data))->includeDirs.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+static int32_t AddInclude(struct argparse* self, const struct argparse_option* option) {
+    ((Options*)(option->data))->includeDirs.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
 
-static int32_t AddGlobalDefine(struct argparse* self, const struct argparse_option* option)
-{ ((Options*)(option->data))->defines.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+static int32_t AddGlobalDefine(struct argparse* self, const struct argparse_option* option) {
+    ((Options*)(option->data))->defines.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
 
-static int32_t AddRelaxedInclude(struct argparse* self, const struct argparse_option* option)
-{ ((Options*)(option->data))->relaxedIncludes.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+static int32_t AddRelaxedInclude(struct argparse* self, const struct argparse_option* option) {
+    ((Options*)(option->data))->relaxedIncludes.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
 
-static int32_t AddSpirvExtension(struct argparse* self, const struct argparse_option* option)
-{ ((Options*)(option->data))->spirvExtensions.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+static int32_t AddSpirvExtension(struct argparse* self, const struct argparse_option* option) {
+    ((Options*)(option->data))->spirvExtensions.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
 
-static int32_t AddCompilerOptions(struct argparse* self, const struct argparse_option* option)
-{ ((Options*)(option->data))->compilerOptions.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+static int32_t AddCompilerOptions(struct argparse* self, const struct argparse_option* option) {
+    ((Options*)(option->data))->compilerOptions.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
 
-static int32_t AddCompilerAlias(struct argparse* self, const struct argparse_option* option)
-{ ((Options*)(option->data))->compilerAliasArgs.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+static int32_t AddCompilerAlias(struct argparse* self, const struct argparse_option* option) {
+    ((Options*)(option->data))->compilerAliasArgs.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
 
-bool Options::Parse(int32_t argc, const char** argv)
-{
+bool Options::Parse(int32_t argc, const char** argv) {
     const char* config = nullptr;
     const char* unused = nullptr; // storage for callbacks
     const char* srcDir = "";
@@ -1065,55 +1002,55 @@ bool Options::Parse(int32_t argc, const char** argv)
     struct argparse_option options[] = {
         OPT_HELP(),
         OPT_GROUP("Required options:"),
-            OPT_STRING('p', "platform", &platformName, "DXBC, DXIL or SPIRV", nullptr, 0, 0),
-            OPT_STRING('c', "config", &config, "Configuration file with the list of shaders to compile", nullptr, 0, 0),
-            OPT_STRING('o', "out", &outputDir, "Output directory", nullptr, 0, 0),
-            OPT_BOOLEAN('b', "binary", &binary, "Output binary files", nullptr, 0, 0),
-            OPT_BOOLEAN('h', "header", &header, "Output header files", nullptr, 0, 0),
-            OPT_BOOLEAN('B', "binaryBlob", &binaryBlob, "Output binary blob files", nullptr, 0, 0),
-            OPT_BOOLEAN('H', "headerBlob", &headerBlob, "Output header blob files", nullptr, 0, 0),
-            OPT_STRING(0, "compiler", &compiler, "Path to an FXC/DXC/Slang compiler executable", nullptr, 0, 0),
+        OPT_STRING('p', "platform", &platformName, "DXBC, DXIL or SPIRV", nullptr, 0, 0),
+        OPT_STRING('c', "config", &config, "Configuration file with the list of shaders to compile", nullptr, 0, 0),
+        OPT_STRING('o', "out", &outputDir, "Output directory", nullptr, 0, 0),
+        OPT_BOOLEAN('b', "binary", &binary, "Output binary files", nullptr, 0, 0),
+        OPT_BOOLEAN('h', "header", &header, "Output header files", nullptr, 0, 0),
+        OPT_BOOLEAN('B', "binaryBlob", &binaryBlob, "Output binary blob files", nullptr, 0, 0),
+        OPT_BOOLEAN('H', "headerBlob", &headerBlob, "Output header blob files", nullptr, 0, 0),
+        OPT_STRING(0, "compiler", &compiler, "Path to an FXC/DXC/Slang compiler executable", nullptr, 0, 0),
         OPT_GROUP("Compiler settings:"),
-            OPT_STRING(0, "compilerAlias", &unused, "Alternate compiler for config-local selection in NAME=path form", AddCompilerAlias, (intptr_t)this, 0),
-            OPT_STRING('m', "shaderModel", &shaderModel, "Shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
-            OPT_INTEGER('O', "optimization", &optimizationLevel, "Optimization level 0-3 (default = 3, disabled = 0)", nullptr, 0, 0),
-            OPT_STRING('X', "compilerOptions", &unused, "Custom command line options for the compiler, separated by spaces", AddCompilerOptions, (intptr_t)this, 0),
-            OPT_BOOLEAN(0, "WX", &warningsAreErrors, "Treat warnings as errors", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "allResourcesBound", &allResourcesBound, "Maps to '-all_resources_bound' DXC/FXC option: all resources bound", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "PDB", &pdb, "Output PDB files in 'out/PDB/' folder when supported", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "embedPDB", &embedPdb, "Embed PDB with the shader binary", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "stripReflection", &stripReflection, "Maps to '-Qstrip_reflect' DXC/FXC option: strip reflection information from a shader binary", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "matrixRowMajor", &matrixRowMajor, "Maps to '-Zpr' DXC/FXC option: pack matrices in row-major order", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "hlsl2021", &hlsl2021, "Maps to '-HV 2021' DXC option: enable HLSL 2021 standard", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "slang", &slang, "Compiler is Slang", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "slangHLSL", &slangHlsl, "Use HLSL compatibility mode when compiler is Slang", nullptr, 0, 0),
+        OPT_STRING(0, "compilerAlias", &unused, "Alternate compiler for config-local selection in NAME=path form", AddCompilerAlias, (intptr_t)this, 0),
+        OPT_STRING('m', "shaderModel", &shaderModel, "Shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
+        OPT_INTEGER('O', "optimization", &optimizationLevel, "Optimization level 0-3 (default = 3, disabled = 0)", nullptr, 0, 0),
+        OPT_STRING('X', "compilerOptions", &unused, "Custom command line options for the compiler, separated by spaces", AddCompilerOptions, (intptr_t)this, 0),
+        OPT_BOOLEAN(0, "WX", &warningsAreErrors, "Treat warnings as errors", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "allResourcesBound", &allResourcesBound, "Maps to '-all_resources_bound' DXC/FXC option: all resources bound", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "PDB", &pdb, "Output PDB files in 'out/PDB/' folder when supported", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "embedPDB", &embedPdb, "Embed PDB with the shader binary", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "stripReflection", &stripReflection, "Maps to '-Qstrip_reflect' DXC/FXC option: strip reflection information from a shader binary", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "matrixRowMajor", &matrixRowMajor, "Maps to '-Zpr' DXC/FXC option: pack matrices in row-major order", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "hlsl2021", &hlsl2021, "Maps to '-HV 2021' DXC option: enable HLSL 2021 standard", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "slang", &slang, "Compiler is Slang", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "slangHLSL", &slangHlsl, "Use HLSL compatibility mode when compiler is Slang", nullptr, 0, 0),
         OPT_GROUP("Defines & include directories:"),
-            OPT_STRING('I', "include", &unused, "Include directory(s)", AddInclude, (intptr_t)this, 0),
-            OPT_STRING('D', "define", &unused, "Macro definition(s) in forms 'M=value' or 'M'", AddGlobalDefine, (intptr_t)this, 0),
+        OPT_STRING('I', "include", &unused, "Include directory(s)", AddInclude, (intptr_t)this, 0),
+        OPT_STRING('D', "define", &unused, "Macro definition(s) in forms 'M=value' or 'M'", AddGlobalDefine, (intptr_t)this, 0),
         OPT_GROUP("Other options:"),
-            OPT_BOOLEAN('f', "force", &force, "Treat all source files as modified", nullptr, 0, 0),
-            OPT_STRING(0, "project", &projectName, "Project name to be seen in informational output", nullptr, 0, 0),
-            OPT_STRING(0, "sourceDir", &srcDir, "Source code directory", nullptr, 0, 0),
-            OPT_STRING(0, "relaxedInclude", &unused, "Include file(s) not invoking re-compilation", AddRelaxedInclude, (intptr_t)this, 0),
-            OPT_STRING(0, "outputExt", &outputExt, "Extension for output files, default is one of .dxbc, .dxil, .spirv", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "serial", &serial, "Disable multi-threading", nullptr, 0, 0),
-            OPT_INTEGER('j', "jobs", &jobs, "Maximum number of parallel compilation tasks (default = number of logical processors)", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "flatten", &flatten, "Flatten source directory structure in the output directory", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "continue", &continueOnError, "Continue compilation if an error occurred", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "colorize", &colorize, "Colorize console output", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "verbose", &verbose, "Print commands before they are executed", nullptr, 0, 0),
-            OPT_INTEGER(0, "retryCount", &retryCount, "Retry count for compilation task sub-process failures", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "ignoreConfigDir", &ignoreConfigDir, "Use 'current dir' instead of 'config dir' as parent path for relative dirs", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "compactProgress", &compactProgress, "Compact compilation progress reporting", nullptr, 0, 0),
+        OPT_BOOLEAN('f', "force", &force, "Treat all source files as modified", nullptr, 0, 0),
+        OPT_STRING(0, "project", &projectName, "Project name to be seen in informational output", nullptr, 0, 0),
+        OPT_STRING(0, "sourceDir", &srcDir, "Source code directory", nullptr, 0, 0),
+        OPT_STRING(0, "relaxedInclude", &unused, "Include file(s) not invoking re-compilation", AddRelaxedInclude, (intptr_t)this, 0),
+        OPT_STRING(0, "outputExt", &outputExt, "Extension for output files, default is one of .dxbc, .dxil, .spirv", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "serial", &serial, "Disable multi-threading", nullptr, 0, 0),
+        OPT_INTEGER('j', "jobs", &jobs, "Maximum number of parallel compilation tasks (default = number of logical processors)", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "flatten", &flatten, "Flatten source directory structure in the output directory", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "continue", &continueOnError, "Continue compilation if an error occurred", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "colorize", &colorize, "Colorize console output", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "verbose", &verbose, "Print commands before they are executed", nullptr, 0, 0),
+        OPT_INTEGER(0, "retryCount", &retryCount, "Retry count for compilation task sub-process failures", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "ignoreConfigDir", &ignoreConfigDir, "Use 'current dir' instead of 'config dir' as parent path for relative dirs", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "compactProgress", &compactProgress, "Compact compilation progress reporting", nullptr, 0, 0),
         OPT_GROUP("SPIRV options:"),
-            OPT_STRING(0, "vulkanMemoryLayout", &vulkanMemoryLayout, "Vulkan memory layout: dx, gl or scalar", nullptr, 0, 0),
-            OPT_STRING(0, "vulkanVersion", &vulkanVersion, "Vulkan environment version (default = 1.3)", nullptr, 0, 0),
-            OPT_STRING(0, "spirvExt", &unused, "Add a permitted SPIR-V extension", AddSpirvExtension, (intptr_t)this, 0),
-            OPT_INTEGER(0, "sRegShift", &sRegShift, "SPIRV: register shift for sampler (s#) resources", nullptr, 0, 0),
-            OPT_INTEGER(0, "tRegShift", &tRegShift, "SPIRV: register shift for texture (t#) resources", nullptr, 0, 0),
-            OPT_INTEGER(0, "bRegShift", &bRegShift, "SPIRV: register shift for constant (b#) resources", nullptr, 0, 0),
-            OPT_INTEGER(0, "uRegShift", &uRegShift, "SPIRV: register shift for UAV (u#) resources", nullptr, 0, 0),
-            OPT_BOOLEAN(0, "noRegShifts", &noRegShifts, "Don't specify any register shifts for the compiler", nullptr, 0, 0),
+        OPT_STRING(0, "vulkanMemoryLayout", &vulkanMemoryLayout, "Vulkan memory layout: dx, gl or scalar", nullptr, 0, 0),
+        OPT_STRING(0, "vulkanVersion", &vulkanVersion, "Vulkan environment version (default = 1.3)", nullptr, 0, 0),
+        OPT_STRING(0, "spirvExt", &unused, "Add a permitted SPIR-V extension", AddSpirvExtension, (intptr_t)this, 0),
+        OPT_INTEGER(0, "sRegShift", &sRegShift, "SPIRV: register shift for sampler (s#) resources", nullptr, 0, 0),
+        OPT_INTEGER(0, "tRegShift", &tRegShift, "SPIRV: register shift for texture (t#) resources", nullptr, 0, 0),
+        OPT_INTEGER(0, "bRegShift", &bRegShift, "SPIRV: register shift for constant (b#) resources", nullptr, 0, 0),
+        OPT_INTEGER(0, "uRegShift", &uRegShift, "SPIRV: register shift for UAV (u#) resources", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "noRegShifts", &noRegShifts, "Don't specify any register shifts for the compiler", nullptr, 0, 0),
         OPT_END(),
     };
 
@@ -1121,58 +1058,49 @@ bool Options::Parse(int32_t argc, const char** argv)
         "ShaderMake.exe -p {DXBC|DXIL|SPIRV} [-b] [-h] [-B] [-H] -c \"path/to/config\"\n"
         "\t-o \"path/to/output\" --compiler \"path/to/compiler\" [--compilerAlias \"NAME=path\"] [other options]\n"
         "\t-D DEF1 -D DEF2=1 ... -I \"path1\" -I \"path2\" ...",
-        nullptr
-    };
+        nullptr};
 
     struct argparse argparse;
     argparse_init(&argparse, options, usages, 0);
     argparse_describe(&argparse, nullptr, "\nMulti-threaded shader compiling & processing tool");
     argparse_parse(&argparse, argc, argv);
 
-    if (!config)
-    {
+    if (!config) {
         Printf(RED "ERROR: Config file not specified!\n");
         return false;
     }
 
-    if (!fs::exists(config))
-    {
+    if (!fs::exists(config)) {
         Printf(RED "ERROR: Config file '%s' does not exist!\n", config);
         return false;
     }
 
-    if (!outputDir)
-    {
+    if (!outputDir) {
         Printf(RED "ERROR: Output directory not specified!\n");
         return false;
     }
 
-    if (!binary && !header && !binaryBlob && !headerBlob)
-    {
+    if (!binary && !header && !binaryBlob && !headerBlob) {
         Printf(RED "ERROR: One of 'binary', 'header', 'binaryBlob' or 'headerBlob' must be set!\n");
         return false;
     }
-    if (!platformName)
-    {
+    if (!platformName) {
         Printf(RED "ERROR: Platform not specified!\n");
         return false;
     }
 
-    if (!compiler)
-    {
+    if (!compiler) {
         Printf(RED "ERROR: Compiler not specified!\n");
         return false;
     }
 
-    if (!fs::exists(compiler))
-    {
+    if (!fs::exists(compiler)) {
         Printf(RED "ERROR: Compiler '%s' does not exist!\n", compiler);
         return false;
     }
 
     uint32_t smMajor = 0, smMinor = 0;
-    if (!ParseShaderModelVersion(shaderModel, smMajor, smMinor))
-    {
+    if (!ParseShaderModelVersion(shaderModel, smMajor, smMinor)) {
         Printf(RED "ERROR: Shader model ('%s') must be major_minor with decimal digits (e.g. '6_5', '6_10')!\n",
             shaderModel ? shaderModel : "");
         return false;
@@ -1180,16 +1108,13 @@ bool Options::Parse(int32_t argc, const char** argv)
 
     // Platform
     uint32_t i = 0;
-    for (; i < PLATFORMS_NUM; i++)
-    {
-        if (!strcmp(platformName, g_PlatformNames[i]))
-        {
+    for (; i < PLATFORMS_NUM; i++) {
+        if (!strcmp(platformName, g_PlatformNames[i])) {
             platform = (Platform)i;
             break;
         }
     }
-    if (i == PLATFORMS_NUM)
-    {
+    if (i == PLATFORMS_NUM) {
         Printf(RED "ERROR: Unrecognized platform '%s'!\n", platformName);
         return false;
     }
@@ -1198,33 +1123,28 @@ bool Options::Parse(int32_t argc, const char** argv)
     slang = slang || IsSlangCompiler(compiler);
     compilerType = slang ? COMPILER_SLANG : (platform == DXBC ? COMPILER_FXC : COMPILER_DXC);
 
-    for (const string& compilerAliasArg : compilerAliasArgs)
-    {
+    for (const string& compilerAliasArg : compilerAliasArgs) {
         size_t separatorPos = compilerAliasArg.find('=');
         string name = ToUpper(compilerAliasArg.substr(0, separatorPos));
         fs::path path = separatorPos == string::npos ? fs::path() : fs::path(compilerAliasArg.substr(separatorPos + 1));
         CompilerType type;
 
-        if (separatorPos == string::npos || name.empty() || path.empty())
-        {
+        if (separatorPos == string::npos || name.empty() || path.empty()) {
             Printf(RED "ERROR: Compiler alias '%s' must use NAME=path form!\n", compilerAliasArg.c_str());
             return false;
         }
 
-        if (!GetCompilerType(name, type))
-        {
+        if (!GetCompilerType(name, type)) {
             Printf(RED "ERROR: Unsupported compiler alias '%s'! Only DXC and SLANG are supported.\n", name.c_str());
             return false;
         }
 
-        if (!fs::exists(path))
-        {
+        if (!fs::exists(path)) {
             Printf(RED "ERROR: Compiler alias '%s' refers to missing file '%s'!\n", name.c_str(), PathToString(path).c_str());
             return false;
         }
 
-        if (FindCompilerAlias(name.c_str()))
-        {
+        if (FindCompilerAlias(name.c_str())) {
             Printf(RED "ERROR: Compiler alias '%s' is specified more than once!\n", name.c_str());
             return false;
         }
@@ -1237,37 +1157,31 @@ bool Options::Parse(int32_t argc, const char** argv)
     else
         g_OutputExt = g_PlatformExts[platform];
 
-    if (g_Options.vulkanMemoryLayout && platform != SPIRV)
-    {
+    if (g_Options.vulkanMemoryLayout && platform != SPIRV) {
         Printf(RED "ERROR: --vulkanMemoryLayout is only supported for SPIRV target!\n");
         return false;
     }
 
-    if (vulkanMemoryLayout &&
-        strcmp(vulkanMemoryLayout, "dx") != 0 &&
-        strcmp(vulkanMemoryLayout, "gl") != 0 &&
-        strcmp(vulkanMemoryLayout, "scalar") != 0)
-    {
+    if (vulkanMemoryLayout && strcmp(vulkanMemoryLayout, "dx") != 0 && strcmp(vulkanMemoryLayout, "gl") != 0 && strcmp(vulkanMemoryLayout, "scalar") != 0) {
         Printf(RED "ERROR: Unsupported value '%s' for --vulkanMemoryLayout! Only 'dx', 'gl' and 'scalar' are supported.\n",
             vulkanMemoryLayout);
         return false;
     }
 
-    if (slang && platform == SPIRV && !GetSlangSpirvCapability(vulkanVersion))
-    {
-        Printf(RED "ERROR: Unsupported value '%s' for --vulkanVersion and Slang! Only '1.0', '1.1', "
-            "'1.1spirv1.4', '1.2', '1.3' and '1.4' are supported.\n", vulkanVersion);
+    if (slang && platform == SPIRV && !GetSlangSpirvCapability(vulkanVersion)) {
+        Printf(RED
+            "ERROR: Unsupported value '%s' for --vulkanVersion and Slang! Only '1.0', '1.1', "
+            "'1.1spirv1.4', '1.2', '1.3' and '1.4' are supported.\n",
+            vulkanVersion);
         return false;
     }
 
-    if (g_Options.retryCount < 0)
-    {
+    if (g_Options.retryCount < 0) {
         Printf(RED "ERROR: --retryCount must be greater than or equal to 0.\n");
         return false;
     }
 
-    if (jobs < 0)
-    {
+    if (jobs < 0) {
         Printf(RED "ERROR: --jobs must be greater than or equal to 0.\n");
         return false;
     }
@@ -1288,20 +1202,16 @@ bool Options::Parse(int32_t argc, const char** argv)
     configFile = fs::path(cd) / fs::path(config);
 
     fs::path fsSrcDir = srcDir;
-    if (fsSrcDir.is_relative())
-    {
+    if (fsSrcDir.is_relative()) {
         if (ignoreConfigDir)
             g_Options.sourceDir = fs::path(cd) / fsSrcDir;
         else
             g_Options.sourceDir = g_Options.configFile.parent_path() / fsSrcDir;
-    }
-    else
+    } else
         g_Options.sourceDir = fsSrcDir;
 
-    for (fs::path& path : includeDirs)
-    {
-        if (path.is_relative())
-        {
+    for (fs::path& path : includeDirs) {
+        if (path.is_relative()) {
             if (ignoreConfigDir)
                 path = fs::path(cd) / path;
             else
@@ -1312,20 +1222,31 @@ bool Options::Parse(int32_t argc, const char** argv)
     return true;
 }
 
-static int32_t AddLocalDefine(struct argparse* self, const struct argparse_option* option)
-{ ((ConfigLine*)(option->data))->defines.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+static int32_t AddLocalDefine(struct argparse* self, const struct argparse_option* option) {
+    ((ConfigLine*)(option->data))->defines.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
 
-static int32_t AddLocalCompilerOptions(struct argparse* self, const struct argparse_option* option)
-{ ((ConfigLine*)(option->data))->compilerOptions.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+static int32_t AddLocalCompilerOptions(struct argparse* self, const struct argparse_option* option) {
+    ((ConfigLine*)(option->data))->compilerOptions.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
 
-static int32_t AddCompilerOptionsDXIL(struct argparse* self, const struct argparse_option* option)
-{ ((ConfigLine*)(option->data))->compilerOptionsDXIL.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+static int32_t AddCompilerOptionsDXIL(struct argparse* self, const struct argparse_option* option) {
+    ((ConfigLine*)(option->data))->compilerOptionsDXIL.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
 
-static int32_t AddCompilerOptionsSPIRV(struct argparse* self, const struct argparse_option* option)
-{ ((ConfigLine*)(option->data))->compilerOptionsSPIRV.push_back(*(const char**)option->value); UNUSED(self); return 0; }
+static int32_t AddCompilerOptionsSPIRV(struct argparse* self, const struct argparse_option* option) {
+    ((ConfigLine*)(option->data))->compilerOptionsSPIRV.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
 
-bool ConfigLine::Parse(int32_t argc, const char** argv)
-{
+bool ConfigLine::Parse(int32_t argc, const char** argv) {
     source = argv[0];
 
     const char* unused = nullptr; // storage for the callback
@@ -1349,8 +1270,7 @@ bool ConfigLine::Parse(int32_t argc, const char** argv)
 
     static const char* usages[] = {
         "path/to/shader -T profile [-E entry] [-O{0|1|2|3}] [-o \"output/subdirectory\"] [-s \"suffix\"] [-m 6_5] [--compilerDXIL NAME] [--compilerSPIRV NAME] [-D DEF1={0,1}] [-D DEF2={0,1,2}] [-D DEF3] [-X \"options\"] [...]",
-        nullptr
-    };
+        nullptr};
 
     struct argparse argparse;
     argparse_init(&argparse, options, usages, 0);
@@ -1361,21 +1281,18 @@ bool ConfigLine::Parse(int32_t argc, const char** argv)
         shaderModel = g_Options.shaderModel;
 
     // If there are some non-option elements in the config line, they will remain in the argv array.
-    if (argv[0])
-    {
+    if (argv[0]) {
         Printf(RED "ERROR: Unrecognized element in the config line: '%s'!\n", argv[0]);
         return false;
     }
 
-    if (!profile)
-    {
+    if (!profile) {
         Printf(RED "ERROR: Shader target not specified!\n");
         return false;
     }
 
     uint32_t smMajor = 0, smMinor = 0;
-    if (!ParseShaderModelVersion(shaderModel, smMajor, smMinor))
-    {
+    if (!ParseShaderModelVersion(shaderModel, smMajor, smMinor)) {
         Printf(RED "ERROR: Shader model ('%s') must be major_minor with decimal digits (e.g. '6_5', '6_10')!\n", shaderModel);
         return false;
     }
@@ -1383,18 +1300,15 @@ bool ConfigLine::Parse(int32_t argc, const char** argv)
     return true;
 }
 
-static bool ReadBinaryFile(const char* file, vector<uint8_t>& outData)
-{
+static bool ReadBinaryFile(const char* file, vector<uint8_t>& outData) {
     FILE* stream = fopen(file, "rb");
-    if (!stream)
-    {
+    if (!stream) {
         Printf(RED "ERROR: Can't open file '%s'!\n", file);
         return false;
     }
 
     uint32_t const binarySize = GetFileLength(stream);
-    if (binarySize == 0)
-    {
+    if (binarySize == 0) {
         Printf(RED "ERROR: Binary file '%s' is empty!\n", file);
         fclose(stream);
         return false;
@@ -1415,11 +1329,9 @@ static bool ReadBinaryFile(const char* file, vector<uint8_t>& outData)
     return success;
 }
 
-static bool TryReserveRetry()
-{
+static bool TryReserveRetry() {
     int32_t retryCount = g_TaskRetryCount.load();
-    while (retryCount > 0)
-    {
+    while (retryCount > 0) {
         if (g_TaskRetryCount.compare_exchange_weak(retryCount, retryCount - 1))
             return true;
     }
@@ -1427,8 +1339,7 @@ static bool TryReserveRetry()
     return false;
 }
 
-static void ExeCompile()
-{
+static void ExeCompile() {
     static const char* optimizationLevelRemap[] = {
         " -Od",
         " -O1",
@@ -1436,8 +1347,7 @@ static void ExeCompile()
         " -O3",
     };
 
-    while (!g_Terminate)
-    {
+    while (!g_Terminate) {
         // Getting a task in the current thread
         TaskData taskData;
         {
@@ -1456,14 +1366,12 @@ static void ExeCompile()
         {
             cmd << EscapePath(taskData.compiler);
 
-            if (taskData.compilerType == COMPILER_SLANG)
-            {
+            if (taskData.compilerType == COMPILER_SLANG) {
                 // Slang defaults to slang language mode unless -lang <other language> sets something else.
                 // For HLSL compatibility mode:
                 //    - use -lang hlsl to set language mode to HLSL
                 //    - use -unscoped-enums so Slang doesn't require all enums to be scoped
-                if (g_Options.slangHlsl)
-                {
+                if (g_Options.slangHlsl) {
                     // Language mode: hlsl
                     cmd << " -lang hlsl";
 
@@ -1476,14 +1384,12 @@ static void ExeCompile()
 
                 // Target/platform
                 cmd << " -target " << g_PlatformSlangTargets[g_Options.platform];
-                if (g_Options.platform == SPIRV)
-                {
+                if (g_Options.platform == SPIRV) {
                     const char* spirvCapability = GetSlangSpirvCapability(g_Options.vulkanVersion);
                     if (spirvCapability)
                         cmd << " -capability " << spirvCapability;
 
-                    for (const string& extension : g_Options.spirvExtensions)
-                    {
+                    for (const string& extension : g_Options.spirvExtensions) {
                         if (extension != "KHR" && extension != "SPV_EXT_mesh_shader")
                             cmd << " -capability " << extension;
                     }
@@ -1493,8 +1399,7 @@ static void ExeCompile()
                 cmd << " -o " << EscapePath(outputFile);
 
                 // Entry point
-                if (taskData.profile != "lib")
-                {
+                if (taskData.profile != "lib") {
                     // Don't specify entry if profile is lib_*, Slang will use the entry point currently
                     cmd << " -entry " << taskData.entryPoint;
                 }
@@ -1527,13 +1432,11 @@ static void ExeCompile()
                 if (g_Options.pdb || g_Options.embedPdb)
                     cmd << " -g";
 
-                if (g_Options.platform == SPIRV)
-                {
+                if (g_Options.platform == SPIRV) {
                     // Uses the entrypoint name from the source instead of 'main' in the SPIRV output
                     cmd << " -fvk-use-entrypoint-name";
 
-                    if (g_Options.vulkanMemoryLayout)
-                    {
+                    if (g_Options.vulkanMemoryLayout) {
                         if (strcmp(g_Options.vulkanMemoryLayout, "scalar") == 0)
                             cmd << " -force-glsl-scalar-layout";
                         else if (strcmp(g_Options.vulkanMemoryLayout, "gl") == 0)
@@ -1542,10 +1445,8 @@ static void ExeCompile()
                             cmd << " -fvk-use-dx-layout";
                     }
 
-                    if (!g_Options.noRegShifts && !taskData.noRegShifts)
-                    {
-                        for (uint32_t space = 0; space < SPIRV_SPACES_NUM; space++)
-                        {
+                    if (!g_Options.noRegShifts && !taskData.noRegShifts) {
+                        for (uint32_t space = 0; space < SPIRV_SPACES_NUM; space++) {
                             cmd << " -fvk-s-shift " << g_Options.sRegShift << " " << space;
                             cmd << " -fvk-t-shift " << g_Options.tRegShift << " " << space;
                             cmd << " -fvk-b-shift " << g_Options.bRegShift << " " << space;
@@ -1563,9 +1464,7 @@ static void ExeCompile()
                     AppendCompilerOptions(cmd, taskData.compilerOptionsDXIL, taskData.compilerType);
                 else if (g_Options.platform == SPIRV)
                     AppendCompilerOptions(cmd, taskData.compilerOptionsSPIRV, taskData.compilerType);
-            }
-            else
-            {
+            } else {
                 cmd << " -nologo";
 
                 // Output file
@@ -1597,9 +1496,7 @@ static void ExeCompile()
                 cmd << optimizationLevelRemap[taskData.optimizationLevel];
 
                 uint32_t smMajor = 0, smMinor = 0;
-                if (ParseShaderModelVersion(taskData.shaderModel.c_str(), smMajor, smMinor) &&
-                    g_Options.platform != DXBC &&
-                    (smMajor > 6 || (smMajor == 6 && smMinor >= 2)))
+                if (ParseShaderModelVersion(taskData.shaderModel.c_str(), smMajor, smMinor) && g_Options.platform != DXBC && (smMajor > 6 || (smMajor == 6 && smMinor >= 2)))
                     cmd << " -enable-16bit-types";
 
                 if (g_Options.warningsAreErrors)
@@ -1620,8 +1517,7 @@ static void ExeCompile()
                 if (g_Options.embedPdb)
                     cmd << " -Qembed_debug";
 
-                if (g_Options.platform == SPIRV)
-                {
+                if (g_Options.platform == SPIRV) {
                     cmd << " -spirv";
 
                     cmd << " -fspv-target-env=vulkan" << g_Options.vulkanVersion;
@@ -1632,24 +1528,20 @@ static void ExeCompile()
                     for (const string& ext : g_Options.spirvExtensions)
                         cmd << " -fspv-extension=" << ext;
 
-                    if (!g_Options.noRegShifts && !taskData.noRegShifts)
-                    {
-                        for (uint32_t space = 0; space < SPIRV_SPACES_NUM; space++)
-                        {
+                    if (!g_Options.noRegShifts && !taskData.noRegShifts) {
+                        for (uint32_t space = 0; space < SPIRV_SPACES_NUM; space++) {
                             cmd << " -fvk-s-shift " << g_Options.sRegShift << " " << space;
                             cmd << " -fvk-t-shift " << g_Options.tRegShift << " " << space;
                             cmd << " -fvk-b-shift " << g_Options.bRegShift << " " << space;
                             cmd << " -fvk-u-shift " << g_Options.uRegShift << " " << space;
                         }
                     }
-                }
-                else // Not supported by SPIRV gen
+                } else // Not supported by SPIRV gen
                 {
                     if (g_Options.stripReflection)
                         cmd << " -Qstrip_reflect";
 
-                    if (g_Options.pdb)
-                    {
+                    if (g_Options.pdb) {
                         fs::path pdbPath = fs::path(outputFile).parent_path() / PDB_DIR;
                         cmd << " -Fd " << EscapePath(pdbPath.string() + "/"); // only binary code affects hash
                     }
@@ -1683,11 +1575,9 @@ static void ExeCompile()
 
         bool isSucceeded = false;
         bool willRetry = false;
-        if (pipe)
-        {
+        if (pipe) {
             char buf[BUF_SIZE];
-            while (fgets(buf, sizeof(buf), pipe))
-            {
+            while (fgets(buf, sizeof(buf), pipe)) {
                 // Ignore useless unmutable FXC messages: "compilation header/object save succeeded"
                 if (g_Options.platform == DXBC && !strncmp(buf, "compilation ", 12))
                     continue;
@@ -1710,47 +1600,36 @@ static void ExeCompile()
             // Retry if count > 0 and failed to execute child sub-process or command shell (posix only)
             else if ((childProcessError || commandShellError) && TryReserveRetry())
                 willRetry = true;
-        }
-        else
+        } else
             willRetry = TryReserveRetry();
 
         // Convert to headers if needed
-        if (isSucceeded && (g_Options.header || (g_Options.headerBlob && taskData.combinedDefines.empty())))
-        {
+        if (isSucceeded && (g_Options.header || (g_Options.headerBlob && taskData.combinedDefines.empty()))) {
             vector<uint8_t> buffer;
-            if (ReadBinaryFile(outputFile.c_str(), buffer))
-            {
+            if (ReadBinaryFile(outputFile.c_str(), buffer)) {
                 string headerFile = taskData.outputFileWithoutExt + g_OutputExt + ".h";
                 DataOutputContext context(headerFile.c_str(), true);
-                if (context.stream)
-                {
+                if (context.stream) {
                     string shaderName = GetShaderName(taskData.outputFileWithoutExt);
                     context.WriteTextPreamble(shaderName.c_str(), taskData.combinedDefines);
                     context.WriteDataAsText(buffer.data(), buffer.size());
                     context.WriteTextEpilog();
 
                     // Try to delete the binary file if it's not requested.
-					// In the unlikely event it fails (one system sometimes holds the file handle too long),
-					// avoid a fatal exit because it's merely an intermediate file.
-                    if (!g_Options.binary)
-					{
-						try
-						{
-							fs::remove(outputFile);
-						}
-						catch(const std::exception& e)
-						{
-							Printf(YELLOW "Could not delete temporary binary file '%s': %s\n", outputFile.c_str(), e.what());
-						}
-					}
-                }
-                else
-                {
+                    // In the unlikely event it fails (one system sometimes holds the file handle too long),
+                    // avoid a fatal exit because it's merely an intermediate file.
+                    if (!g_Options.binary) {
+                        try {
+                            fs::remove(outputFile);
+                        } catch (const std::exception& e) {
+                            Printf(YELLOW "Could not delete temporary binary file '%s': %s\n", outputFile.c_str(), e.what());
+                        }
+                    }
+                } else {
                     Printf(RED "ERROR: Failed to open file '%s' for writing!\n", headerFile.c_str());
                     isSucceeded = false;
                 }
-            }
-            else
+            } else
                 isSucceeded = false;
         }
 
@@ -1763,21 +1642,18 @@ static void ExeCompile()
 // MAIN
 //=====================================================================================================================
 
-static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& callStack, fs::file_time_type& outTime)
-{
+static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& callStack, fs::file_time_type& outTime) {
     static const basic_regex<char> includePattern("\\s*#include\\s+[\"<]([^>\"]+)[>\"].*");
 
     auto found = g_HierarchicalUpdateTimes.find(file);
-    if (found != g_HierarchicalUpdateTimes.end())
-    {
+    if (found != g_HierarchicalUpdateTimes.end()) {
         outTime = found->second;
 
         return true;
     }
 
     ifstream stream(file);
-    if (!stream.is_open())
-    {
+    if (!stream.is_open()) {
         Printf(RED "ERROR: Can't open file '%s', included in:\n", PathToString(file).c_str());
         for (const fs::path& otherFile : callStack)
             Printf(RED "\t%s\n", PathToString(otherFile).c_str());
@@ -1790,8 +1666,7 @@ static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& call
     fs::path path = file.parent_path();
     fs::file_time_type hierarchicalUpdateTime = fs::last_write_time(file);
 
-    for (string line; getline(stream, line);)
-    {
+    for (string line; getline(stream, line);) {
         match_results<const char*> matchResult;
         regex_match(line.c_str(), matchResult, includePattern);
         if (matchResult.empty())
@@ -1805,21 +1680,17 @@ static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& call
         fs::path includeFile = path / includeName;
         if (fs::exists(includeFile))
             isFound = true;
-        else
-        {
-            for (const fs::path& includePath : g_Options.includeDirs)
-            {
+        else {
+            for (const fs::path& includePath : g_Options.includeDirs) {
                 includeFile = includePath / includeName;
-                if (fs::exists(includeFile))
-                {
+                if (fs::exists(includeFile)) {
                     isFound = true;
                     break;
                 }
             }
         }
 
-        if (!isFound)
-        {
+        if (!isFound) {
             Printf(RED "ERROR: Can't find include file '%s', included in:\n", PathToString(includeName).c_str());
             for (const fs::path& otherFile : callStack)
                 Printf(RED "\t%s\n", PathToString(otherFile).c_str());
@@ -1842,8 +1713,7 @@ static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& call
     return true;
 }
 
-static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::file_time_type& configTime)
-{
+static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::file_time_type& configTime) {
     // Tokenize
     string lineCopy = line;
     vector<const char*> tokens;
@@ -1851,8 +1721,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
 
     // Parse config line
     ConfigLine configLine;
-    if (!configLine.Parse((int32_t)tokens.size(), tokens.data()))
-    {
+    if (!configLine.Parse((int32_t)tokens.size(), tokens.data())) {
         Printf(RED "%s(%u,0): ERROR: Can't parse config line!\n", PathToString(g_Options.configFile).c_str(), lineIndex + 1);
 
         return false;
@@ -1870,11 +1739,9 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
         compilerAliasName = configLine.compilerSPIRV;
 
     const CompilerAlias* compilerAlias = nullptr;
-    if (compilerAliasName)
-    {
+    if (compilerAliasName) {
         compilerAlias = FindCompilerAlias(compilerAliasName);
-        if (!compilerAlias)
-        {
+        if (!compilerAlias) {
             Printf(RED "%s(%u,0): ERROR: Compiler alias '%s' is not registered!\n",
                 PathToString(g_Options.configFile).c_str(), lineIndex + 1, compilerAliasName);
             return false;
@@ -1882,11 +1749,10 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     }
 
     CompilerType compilerType = compilerAlias ? compilerAlias->type : g_Options.compilerType;
-    if (compilerType == COMPILER_SLANG && g_Options.platform == SPIRV)
-    {
-        if (!GetSlangSpirvCapability(g_Options.vulkanVersion))
-        {
-            Printf(RED "%s(%u,0): ERROR: Unsupported value '%s' for --vulkanVersion and Slang! Only '1.0', '1.1', "
+    if (compilerType == COMPILER_SLANG && g_Options.platform == SPIRV) {
+        if (!GetSlangSpirvCapability(g_Options.vulkanVersion)) {
+            Printf(RED
+                "%s(%u,0): ERROR: Unsupported value '%s' for --vulkanVersion and Slang! Only '1.0', '1.1', "
                 "'1.1spirv1.4', '1.2', '1.3' and '1.4' are supported.\n",
                 PathToString(g_Options.configFile).c_str(), lineIndex + 1, g_Options.vulkanVersion);
             return false;
@@ -1894,8 +1760,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
 
         uint32_t minSpirvVersion = GetSlangProfileMinSpirvVersion(configLine.shaderModel);
         uint32_t maxSpirvVersion = GetVulkanMaxSpirvVersion(g_Options.vulkanVersion);
-        if (minSpirvVersion > maxSpirvVersion)
-        {
+        if (minSpirvVersion > maxSpirvVersion) {
             Printf(RED "%s(%u,0): ERROR: Slang shader model '%s' requires SPIR-V %u.%u, which is not supported by Vulkan %s!\n",
                 PathToString(g_Options.configFile).c_str(), lineIndex + 1, configLine.shaderModel,
                 minSpirvVersion / 100, minSpirvVersion % 100, g_Options.vulkanVersion);
@@ -1904,12 +1769,10 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     }
 
     bool compilerAliasBuildSignatureChanged = false;
-    if (compilerAlias)
-    {
+    if (compilerAlias) {
         auto [signatureIt, inserted] = g_CompilerAliasBuildSignatures.try_emplace(compilerAlias->name);
         BuildSignature& buildSignature = signatureIt->second;
-        if (inserted)
-        {
+        if (inserted) {
             buildSignature.path = GetCompilerAliasBuildSignaturePath(compilerAlias->name);
             buildSignature.value = GetCompilerBuildSignature(compilerAlias->path, compilerAlias->type);
             buildSignature.changed = !IsBuildSignatureCurrent(buildSignature.path, buildSignature.value);
@@ -1924,18 +1787,16 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
 
     // Concatenate define strings, i.e. to get something, like: "A=1 B=0 C"
     string combinedDefines = "";
-    for (size_t i = 0; i < configLine.defines.size(); i++)
-    {
+    for (size_t i = 0; i < configLine.defines.size(); i++) {
         size_t sortedIndex = definesSortedIndices[i];
         combinedDefines += configLine.defines[sortedIndex];
-        if (i != configLine.defines.size() - 1 )
+        if (i != configLine.defines.size() - 1)
             combinedDefines += " ";
     }
 
     // Compiled shader name
     fs::path shaderName = RemoveLeadingDotDots(configLine.source);
-    if (configLine.outputSuffix)
-    {
+    if (configLine.outputSuffix) {
         string filename = shaderName.filename().string();
         size_t extensionPos = filename.find('.');
         filename.insert(extensionPos == string::npos ? filename.size() : extensionPos, configLine.outputSuffix);
@@ -1949,8 +1810,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
 
     // Compiled permutation name
     fs::path permutationName = shaderName;
-    if (!configLine.defines.empty())
-    {
+    if (!configLine.defines.empty()) {
         uint32_t permutationHash = HashToUint(hash<string>()(combinedDefines));
 
         char buf[16];
@@ -1972,8 +1832,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     transform(outputKey.begin(), outputKey.end(), outputKey.begin(), [](char ch) { return (char)tolower((unsigned char)ch); });
 #endif
     auto [outputIt, outputInserted] = g_OutputLines.emplace(outputKey, lineIndex + 1);
-    if (!outputInserted)
-    {
+    if (!outputInserted) {
         Printf(RED "%s(%u,0): ERROR: Output '%s' is already produced by line %u!\n",
             PathToString(g_Options.configFile).c_str(), lineIndex + 1, outputKey.c_str(), outputIt->second);
         return false;
@@ -1984,8 +1843,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     fs::path endPath = outputDir / shaderName.parent_path();
     if (g_Options.pdb && compilerType != COMPILER_SLANG)
         endPath /= PDB_DIR;
-    if (endPath.string() != "" && !fs::exists(endPath))
-    {
+    if (endPath.string() != "" && !fs::exists(endPath)) {
         fs::create_directories(endPath);
         force = true;
     }
@@ -1998,11 +1856,9 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
         fs::path outputFile = outputDir / permutationName;
 
         outputFile += g_OutputExt;
-        if (g_Options.binary)
-        {
+        if (g_Options.binary) {
             force |= !fs::exists(outputFile);
-            if (!force)
-            {
+            if (!force) {
                 if (outputTime == zero)
                     outputTime = fs::last_write_time(outputFile);
                 else
@@ -2011,11 +1867,9 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
         }
 
         outputFile += ".h";
-        if (g_Options.header)
-        {
+        if (g_Options.header) {
             force |= !fs::exists(outputFile);
-            if (!force)
-            {
+            if (!force) {
                 if (outputTime == zero)
                     outputTime = fs::last_write_time(outputFile);
                 else
@@ -2028,11 +1882,9 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
         fs::path outputFile = outputDir / shaderName;
 
         outputFile += g_OutputExt;
-        if (g_Options.binaryBlob)
-        {
+        if (g_Options.binaryBlob) {
             force |= !fs::exists(outputFile);
-            if (!force)
-            {
+            if (!force) {
                 if (outputTime == zero)
                     outputTime = fs::last_write_time(outputFile);
                 else
@@ -2041,11 +1893,9 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
         }
 
         outputFile += ".h";
-        if (g_Options.headerBlob)
-        {
+        if (g_Options.headerBlob) {
             force |= !fs::exists(outputFile);
-            if (!force)
-            {
+            if (!force) {
                 if (outputTime == zero)
                     outputTime = fs::last_write_time(outputFile);
                 else
@@ -2054,8 +1904,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
         }
     }
 
-    if (!force)
-    {
+    if (!force) {
         list<fs::path> callStack;
         fs::file_time_type sourceTime;
         fs::path sourceFile = g_Options.sourceDir / configLine.source;
@@ -2094,8 +1943,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     taskData.noRegShifts = configLine.noRegShifts;
 
     // Gather blobs
-    if (g_Options.IsBlob())
-    {
+    if (g_Options.IsBlob()) {
         string blobName = PathToString(outputDir / shaderName);
         vector<BlobEntry>& entries = g_ShaderBlobs[blobName];
 
@@ -2108,23 +1956,20 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     return true;
 }
 
-static bool ExpandPermutations(uint32_t lineIndex, const string& line, const fs::file_time_type& configTime)
-{
+static bool ExpandPermutations(uint32_t lineIndex, const string& line, const fs::file_time_type& configTime) {
     size_t opening = line.find('{');
     if (opening == string::npos)
         return ProcessConfigLine(lineIndex, line, configTime);
 
     size_t closing = line.find('}', opening);
-    if (closing == string::npos)
-    {
+    if (closing == string::npos) {
         Printf(RED "%s(%u,0): ERROR: Missing '}'!\n", PathToString(g_Options.configFile).c_str(), lineIndex + 1);
 
         return false;
     }
 
     size_t current = opening + 1;
-    while (true)
-    {
+    while (true) {
         size_t comma = line.find(',', current);
         if (comma == string::npos || comma > closing)
             comma = closing;
@@ -2141,8 +1986,7 @@ static bool ExpandPermutations(uint32_t lineIndex, const string& line, const fs:
     return true;
 }
 
-static bool CreateBlob(const string& blobName, const vector<BlobEntry>& entries, bool useTextOutput)
-{
+static bool CreateBlob(const string& blobName, const vector<BlobEntry>& entries, bool useTextOutput) {
     // Create output file
     string outputFile = blobName;
     outputFile += g_OutputExt;
@@ -2150,15 +1994,13 @@ static bool CreateBlob(const string& blobName, const vector<BlobEntry>& entries,
         outputFile += ".h";
 
     DataOutputContext outputContext(outputFile.c_str(), useTextOutput);
-    if (!outputContext.stream)
-    {
+    if (!outputContext.stream) {
         Printf(RED "ERROR: Can't open output file '%s'!\n", outputFile.c_str());
 
         return false;
     }
 
-    if (useTextOutput)
-    {
+    if (useTextOutput) {
         string name = GetShaderName(blobName);
         outputContext.WriteTextPreamble(name.c_str(), "");
     }
@@ -2168,8 +2010,7 @@ static bool CreateBlob(const string& blobName, const vector<BlobEntry>& entries,
         : &DataOutputContext::WriteDataAsBinaryCallback;
 
     // Write "blob" header
-    if (!ShaderMake::WriteFileHeader(writeFileCallback, &outputContext))
-    {
+    if (!ShaderMake::WriteFileHeader(writeFileCallback, &outputContext)) {
         Printf(RED "ERROR: Failed to write into output file '%s'!\n", outputFile.c_str());
 
         return false;
@@ -2178,21 +2019,17 @@ static bool CreateBlob(const string& blobName, const vector<BlobEntry>& entries,
     bool success = true;
 
     // Collect individual permutations
-    for (const BlobEntry& entry : entries)
-    {
+    for (const BlobEntry& entry : entries) {
         // Open compiled permutation file
         string file = entry.permutationFileWithoutExt + g_OutputExt;
 
         vector<uint8_t> fileData;
-        if (ReadBinaryFile(file.c_str(), fileData))
-        {
-            if (!ShaderMake::WritePermutation(writeFileCallback, &outputContext, entry.combinedDefines, fileData.data(), fileData.size()))
-            {
+        if (ReadBinaryFile(file.c_str(), fileData)) {
+            if (!ShaderMake::WritePermutation(writeFileCallback, &outputContext, entry.combinedDefines, fileData.data(), fileData.size())) {
                 Printf(RED "ERROR: Failed to write a shader permutation into '%s'!\n", outputFile.c_str());
                 success = false;
             }
-        }
-        else
+        } else
             success = false;
 
         if (!success)
@@ -2205,17 +2042,14 @@ static bool CreateBlob(const string& blobName, const vector<BlobEntry>& entries,
     return success;
 }
 
-static void RemoveIntermediateBlobFiles(const vector<BlobEntry>& entries)
-{
-    for (const BlobEntry& entry : entries)
-    {
+static void RemoveIntermediateBlobFiles(const vector<BlobEntry>& entries) {
+    for (const BlobEntry& entry : entries) {
         string file = entry.permutationFileWithoutExt + g_OutputExt;
         fs::remove(file);
     }
 }
 
-static void SignalHandler(int32_t sig)
-{
+static void SignalHandler(int32_t sig) {
     UNUSED(sig);
 
     g_Terminate = true;
@@ -2223,8 +2057,7 @@ static void SignalHandler(int32_t sig)
     Printf(RED "Aborting...\n");
 }
 
-int32_t main(int32_t argc, const char** argv)
-{
+int32_t main(int32_t argc, const char** argv) {
     // Init timer
     Timer_Init();
     uint64_t start = Timer_GetTicks();
@@ -2262,8 +2095,7 @@ int32_t main(int32_t argc, const char** argv)
         vector<bool> blocks;
         blocks.push_back(true);
 
-        for (uint32_t lineIndex = 0; getline(configStream, line); lineIndex++)
-        {
+        for (uint32_t lineIndex = 0; getline(configStream, line); lineIndex++) {
             TrimConfigLine(line);
 
             // Skip an empty or commented line
@@ -2272,8 +2104,7 @@ int32_t main(int32_t argc, const char** argv)
 
             // TODO: preprocessor supports "#ifdef MACRO / #if 1 / #if 0", "#else" and "#endif"
             size_t pos = line.find("#ifdef");
-            if (pos != string::npos)
-            {
+            if (pos != string::npos) {
                 pos += 6;
                 pos += line.substr(pos).find_first_not_of(' ');
 
@@ -2281,27 +2112,21 @@ int32_t main(int32_t argc, const char** argv)
                 bool state = blocks.back() && HasConfigDefine(define.c_str());
 
                 blocks.push_back(state);
-            }
-            else if (line.find("#if 1") != string::npos)
+            } else if (line.find("#if 1") != string::npos)
                 blocks.push_back(blocks.back());
             else if (line.find("#if 0") != string::npos)
                 blocks.push_back(false);
-            else if (line.find("#endif") != string::npos)
-            {
+            else if (line.find("#endif") != string::npos) {
                 if (blocks.size() == 1)
                     Printf(RED "%s(%u,0): ERROR: Unexpected '#endif'!\n", PathToString(g_Options.configFile).c_str(), lineIndex + 1);
                 else
                     blocks.pop_back();
-            }
-            else if (line.find("#else") != string::npos)
-            {
+            } else if (line.find("#else") != string::npos) {
                 if (blocks.size() < 2)
                     Printf(RED "%s(%u,0): ERROR: Unexpected '#else'!\n", PathToString(g_Options.configFile).c_str(), lineIndex + 1);
                 else if (blocks[blocks.size() - 2])
                     blocks.back() = !blocks.back();
-            }
-            else if (blocks.back())
-            {
+            } else if (blocks.back()) {
                 if (!ExpandPermutations(lineIndex, line, configTime))
                     return 1;
             }
@@ -2312,8 +2137,7 @@ int32_t main(int32_t argc, const char** argv)
     if (buildSignatureNeedsWrite && !InvalidateBuildSignature(buildSignaturePath))
         return 1;
 
-    for (const auto& [name, compilerBuildSignature] : g_CompilerAliasBuildSignatures)
-    {
+    for (const auto& [name, compilerBuildSignature] : g_CompilerAliasBuildSignatures) {
         UNUSED(name);
         if (compilerBuildSignature.changed && !InvalidateBuildSignature(compilerBuildSignature.path))
             return 1;
@@ -2323,8 +2147,7 @@ int32_t main(int32_t argc, const char** argv)
         Printf(YELLOW "WARNING: ShaderMake does not support separate PDB output with Slang; --PDB enables debug information in the shader binary.\n");
 
     // Process tasks
-    if (!g_TaskData.empty())
-    {
+    if (!g_TaskData.empty()) {
         Printf(WHITE "Compiling shaders using default compiler: %s\n", g_Options.compiler);
         for (const CompilerAlias& compilerAlias : g_Options.compilerAliases)
             Printf(WHITE "Compiler alias %s: %s\n", compilerAlias.name.c_str(), PathToString(compilerAlias.path).c_str());
@@ -2352,8 +2175,7 @@ int32_t main(int32_t argc, const char** argv)
             return 1;
 
         // Dump shader blobs
-        for (const auto& [blobName, blobEntries] : g_ShaderBlobs)
-        {
+        for (const auto& [blobName, blobEntries] : g_ShaderBlobs) {
             // If a blob contains one entry with no defines, just skip it.
             // The individual file's output name is the same as the blob, and we're done here.
             if (blobEntries.size() == 1 && blobEntries[0].combinedDefines.empty())
@@ -2363,10 +2185,8 @@ int32_t main(int32_t argc, const char** argv)
             // In such case, that individual shader's output file is the same as the blob output file, which wouldn't work.
             // We could detect this condition earlier and work around it by renaming the shader output file, if necessary.
             bool invalidEntry = false;
-            for (const auto& entry : blobEntries)
-            {
-                if (entry.combinedDefines.empty())
-                {
+            for (const auto& entry : blobEntries) {
+                if (entry.combinedDefines.empty()) {
                     const string blobBaseName = fs::path(blobName).stem().generic_string();
                     Printf(RED "ERROR: Cannot create a blob for shader %s where some permutation(s) have no definitions!", blobBaseName.c_str());
                     invalidEntry = true;
@@ -2374,8 +2194,7 @@ int32_t main(int32_t argc, const char** argv)
                 }
             }
 
-            if (invalidEntry)
-            {
+            if (invalidEntry) {
                 buildSucceeded = false;
                 if (g_Options.continueOnError)
                     continue;
@@ -2383,16 +2202,14 @@ int32_t main(int32_t argc, const char** argv)
                 return 1;
             }
 
-            if (g_Options.binaryBlob)
-            {
+            if (g_Options.binaryBlob) {
                 bool result = CreateBlob(blobName, blobEntries, false);
                 buildSucceeded &= result;
                 if (!result && !g_Options.continueOnError)
                     return 1;
             }
 
-            if (g_Options.headerBlob)
-            {
+            if (g_Options.headerBlob) {
                 bool result = CreateBlob(blobName, blobEntries, true);
                 buildSucceeded &= result;
                 if (!result && !g_Options.continueOnError)
@@ -2413,13 +2230,11 @@ int32_t main(int32_t argc, const char** argv)
             Printf(WHITE "%u task(s) completed successfully (elapsed time %.2f ms)\n", g_OriginalTaskCount, ms);
     }
 
-    if (!g_Terminate && !g_FailedTaskCount && buildSucceeded)
-    {
+    if (!g_Terminate && !g_FailedTaskCount && buildSucceeded) {
         if (buildSignatureNeedsWrite && !WriteBuildSignature(buildSignaturePath, buildSignature))
             return 1;
 
-        for (const auto& [name, compilerBuildSignature] : g_CompilerAliasBuildSignatures)
-        {
+        for (const auto& [name, compilerBuildSignature] : g_CompilerAliasBuildSignatures) {
             UNUSED(name);
             if (compilerBuildSignature.changed && !WriteBuildSignature(compilerBuildSignature.path, compilerBuildSignature.value))
                 return 1;

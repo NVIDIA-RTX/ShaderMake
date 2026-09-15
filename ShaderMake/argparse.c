@@ -25,27 +25,25 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
  */
 
+#include <assert.h>
+#include <errno.h> // NV: added errno.h, it was missing
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
-#include <stdbool.h>
-#include <errno.h> // NV: added errno.h, it was missing
 
 #include "argparse.h"
 
 #define OPT_UNSET 1
-#define OPT_LONG (1 << 1)
+#define OPT_LONG  (1 << 1)
 
-static const char*
-prefix_skip(const char* str, const char* prefix) {
+static const char* prefix_skip(const char* str, const char* prefix) {
     size_t len = strlen(prefix);
 
     return strncmp(str, prefix, len) ? NULL : str + len;
 }
 
-static int
-prefix_cmp(const char* str, const char* prefix) {
+static int prefix_cmp(const char* str, const char* prefix) {
     for (;; str++, prefix++)
         if (!*prefix)
             return 0;
@@ -53,8 +51,7 @@ prefix_cmp(const char* str, const char* prefix) {
             return (unsigned char)*prefix - (unsigned char)*str;
 }
 
-static void
-argparse_error(struct argparse* self, const struct argparse_option* opt, const char* reason, int flags) {
+static void argparse_error(struct argparse* self, const struct argparse_option* opt, const char* reason, int flags) {
     (void)self;
     if (flags & OPT_LONG)
         fprintf(stderr, "error: option `--%s` %s\n", opt->long_name, reason);
@@ -63,8 +60,7 @@ argparse_error(struct argparse* self, const struct argparse_option* opt, const c
     exit(EXIT_FAILURE);
 }
 
-static int
-argparse_getvalue(struct argparse* self, const struct argparse_option* opt, int flags) {
+static int argparse_getvalue(struct argparse* self, const struct argparse_option* opt, int flags) {
     const char* s = NULL;
     if (!opt->value)
         goto skipped;
@@ -138,8 +134,7 @@ skipped:
     return 0;
 }
 
-static void
-argparse_options_check(const struct argparse_option* options) {
+static void argparse_options_check(const struct argparse_option* options) {
     for (; options->type != ARGPARSE_OPT_END; options++) {
         switch (options->type) {
             case ARGPARSE_OPT_END:
@@ -157,8 +152,7 @@ argparse_options_check(const struct argparse_option* options) {
     }
 }
 
-static int
-argparse_short_opt(struct argparse* self, const struct argparse_option* options) {
+static int argparse_short_opt(struct argparse* self, const struct argparse_option* options) {
     for (; options->type != ARGPARSE_OPT_END; options++) {
         if (options->short_name == *self->optvalue) {
             self->optvalue = self->optvalue[1] ? self->optvalue + 1 : NULL;
@@ -169,8 +163,7 @@ argparse_short_opt(struct argparse* self, const struct argparse_option* options)
     return -2;
 }
 
-static int
-argparse_long_opt(struct argparse* self, const struct argparse_option* options) {
+static int argparse_long_opt(struct argparse* self, const struct argparse_option* options) {
     for (; options->type != ARGPARSE_OPT_END; options++) {
         const char* rest;
         int opt_flags = 0;
