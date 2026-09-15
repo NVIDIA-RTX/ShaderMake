@@ -266,6 +266,16 @@ static inline uint32_t HashToUint(size_t hash) {
     return uint32_t(hash) ^ (uint32_t(hash >> 32));
 }
 
+static uint64_t HashString(const string& value) {
+    uint64_t hash = 14695981039346656037ull;
+    for (uint8_t ch : value) {
+        hash ^= ch;
+        hash *= 1099511628211ull;
+    }
+
+    return hash;
+}
+
 static string PathToString(fs::path path) {
     return path.lexically_normal().make_preferred().string();
 }
@@ -562,12 +572,25 @@ static string GetBuildSignature() {
     return signature.str();
 }
 
+// Multiple configs may share an output directory, so each one needs an independent signature.
+static string GetBuildSignatureStem() {
+    string configPath = PathToString(fs::absolute(g_Options.configFile));
+#ifdef _WIN32
+    transform(configPath.begin(), configPath.end(), configPath.begin(), [](char ch) { return (char)tolower((unsigned char)ch); });
+#endif
+
+    char configHash[17];
+    snprintf(configHash, sizeof(configHash), "%016llX", (unsigned long long)HashString(configPath));
+
+    return ".ShaderMake." + string(g_Options.platformName) + "." + configHash;
+}
+
 static fs::path GetBuildSignaturePath() {
-    return fs::path(g_Options.outputDir) / (".ShaderMake." + string(g_Options.platformName) + ".signature");
+    return fs::path(g_Options.outputDir) / (GetBuildSignatureStem() + ".signature");
 }
 
 static fs::path GetCompilerAliasBuildSignaturePath(const string& name) {
-    return fs::path(g_Options.outputDir) / (".ShaderMake." + string(g_Options.platformName) + "." + name + ".compiler.signature");
+    return fs::path(g_Options.outputDir) / (GetBuildSignatureStem() + "." + name + ".compiler.signature");
 }
 
 static bool IsBuildSignatureCurrent(const fs::path& path, const string& signature) {
