@@ -477,12 +477,29 @@ static void AppendBuildSignaturePaths(ostringstream& signature, const char* name
         AppendBuildSignatureValue(signature, name, PathToString(path));
 }
 
+static string FileTimeToString(fs::file_time_type time) {
+    // libc++ can use a 128-bit filesystem clock, which has no to_string overload.
+    auto ticks = time.time_since_epoch().count();
+    const bool negative = ticks < 0;
+    string result;
+    do {
+        const int digit = static_cast<int>(ticks % 10);
+        result.push_back(static_cast<char>('0' + (digit < 0 ? -digit : digit)));
+        ticks /= 10;
+    } while (ticks != 0);
+    if (negative)
+        result.push_back('-');
+    reverse(result.begin(), result.end());
+
+    return result;
+}
+
 static void AppendCompilerBuildSignature(ostringstream& signature, const fs::path& compilerPath, CompilerType compilerType) {
     fs::path path = fs::absolute(compilerPath).lexically_normal();
     AppendBuildSignatureValue(signature, "compiler", PathToString(path));
     AppendBuildSignatureValue(signature, "compilerType", to_string(compilerType));
     AppendBuildSignatureValue(signature, "compilerSize", to_string(fs::file_size(path)));
-    AppendBuildSignatureValue(signature, "compilerTime", to_string(fs::last_write_time(path).time_since_epoch().count()));
+    AppendBuildSignatureValue(signature, "compilerTime", FileTimeToString(fs::last_write_time(path)));
 
 #ifdef _WIN32
     static const char* dxcSidecars[] = {"dxcompiler.dll", "dxil.dll"};
@@ -525,7 +542,7 @@ static void AppendCompilerBuildSignature(ostringstream& signature, const fs::pat
 
             AppendBuildSignatureValue(signature, "compilerSidecar", PathToString(sidecarPath));
             AppendBuildSignatureValue(signature, "compilerSidecarSize", to_string(fs::file_size(sidecarPath)));
-            AppendBuildSignatureValue(signature, "compilerSidecarTime", to_string(fs::last_write_time(sidecarPath).time_since_epoch().count()));
+            AppendBuildSignatureValue(signature, "compilerSidecarTime", FileTimeToString(fs::last_write_time(sidecarPath)));
         }
     }
 }
