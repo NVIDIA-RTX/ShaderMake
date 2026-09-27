@@ -90,6 +90,7 @@ enum CompilerType : uint8_t {
     COMPILER_DXC,
     COMPILER_SLANG,
     COMPILER_METAL,
+    COMPILER_METAL_SHADER_CONVERTER,
 };
 
 struct CompilerAlias {
@@ -104,10 +105,12 @@ struct Options {
     vector<string> defines;
     vector<string> spirvExtensions = {"SPV_EXT_descriptor_indexing", "KHR"};
     vector<string> compilerOptions;
+    vector<string> metalShaderConverterOptions;
     vector<string> compilerAliasArgs;
     vector<CompilerAlias> compilerAliases;
     fs::path configFile;
     fs::path metalCompiler;
+    fs::path metalShaderConverter;
     fs::path sourceDir;
     const char* projectName = "";
     const char* platformName = nullptr;
@@ -151,6 +154,7 @@ struct Options {
     bool slangHlsl = false;
     bool noRegShifts = false;
     bool compactProgress = false;
+    bool metalFromDxil = false;
 
     bool Parse(int32_t argc, const char** argv);
 
@@ -164,6 +168,7 @@ struct ConfigLine {
     vector<string> compilerOptions;
     vector<string> compilerOptionsDXIL;
     vector<string> compilerOptionsSPIRV;
+    vector<string> metalShaderConverterOptions;
     const char* source = nullptr;
     const char* entryPoint = "main";
     const char* profile = nullptr;
@@ -184,6 +189,7 @@ struct TaskData {
     vector<string> compilerOptions;
     vector<string> compilerOptionsDXIL;
     vector<string> compilerOptionsSPIRV;
+    vector<string> metalShaderConverterOptions;
     string source;
     string entryPoint;
     string profile;
@@ -236,6 +242,9 @@ std::array<const char*, PLATFORMS_NUM> g_PlatformExts = {
     ".spirv",
     ".metallib",
 };
+
+// Metal converter bundle ("ShaderBlob.h")
+const char* g_MetalConverterBundleExt = ".metalbundle";
 
 std::array<const char*, 3> g_PlatformSlangTargets = {
     "dxbc",
@@ -516,16 +525,19 @@ static void AppendCompilerBuildSignature(ostringstream& signature, const fs::pat
     static const char* slangSidecars[] = {
         "gfx.dll", "slang-compiler.dll", "slang-glsl-module.dll", "slang-glslang.dll",
         "slang-llvm.dll", "slang-rt.dll", "slang.dll"};
+    static const char* metalShaderConverterSidecars[] = {"metalirconverter.dll"};
 #elif defined(__APPLE__)
     static const char* dxcSidecars[] = {"libdxcompiler.dylib", "libdxil.dylib"};
     static const char* slangSidecars[] = {
         "libgfx.dylib", "libslang-compiler.dylib", "libslang-glsl-module.dylib", "libslang-glslang.dylib",
         "libslang-llvm.dylib", "libslang-rt.dylib", "libslang.dylib"};
+    static const char* metalShaderConverterSidecars[] = {"libmetalirconverter.dylib"};
 #else
     static const char* dxcSidecars[] = {"libdxcompiler.so", "libdxil.so"};
     static const char* slangSidecars[] = {
         "libgfx.so", "libslang-compiler.so", "libslang-glsl-module.so", "libslang-glslang.so",
         "libslang-llvm.so", "libslang-rt.so", "libslang.so"};
+    static const char* metalShaderConverterSidecars[] = {"libmetalirconverter.so"};
 #endif
 
     const char* const* sidecars = nullptr;
@@ -536,6 +548,9 @@ static void AppendCompilerBuildSignature(ostringstream& signature, const fs::pat
     } else if (compilerType == COMPILER_SLANG) {
         sidecars = slangSidecars;
         sidecarNum = COUNT_OF(slangSidecars);
+    } else if (compilerType == COMPILER_METAL_SHADER_CONVERTER) {
+        sidecars = metalShaderConverterSidecars;
+        sidecarNum = COUNT_OF(metalShaderConverterSidecars);
     }
 
     fs::path sidecarDirs[] = {
@@ -563,6 +578,71 @@ static string GetCompilerBuildSignature(const fs::path& compilerPath, CompilerTy
     AppendCompilerBuildSignature(signature, compilerPath, compilerType);
 
     return signature.str();
+}
+
+static uint64_t GetFileContentsHash(const fs::path& path) {
+    ifstream stream(path, ios::binary);
+    ostringstream contents;
+    contents << stream.rdbuf();
+
+    return HashString(contents.str());
+}
+
+// Input files of "metal-shaderconverter" options: "--option=<file>" or "--option <file>", with one or two dashes
+static vector<fs::path> GetMetalShaderConverterInputFiles(const vector<string>& metalShaderConverterOptions) {
+    static const char* fileOptions[] = {"root-signature", "local-root-signature", "vertex-input-layout-file"};
+
+    vector<string> tokens;
+    for (const string& options : metalShaderConverterOptions) {
+        string token;
+        bool isToken = false;
+        char quote = 0;
+        for (char ch : options) {
+            if (quote) {
+                if (ch == quote)
+                    quote = 0;
+                else
+                    token += ch;
+            } else if (ch == '"' || ch == '\'') {
+                quote = ch;
+                isToken = true;
+            } else if (IsSpace(ch)) {
+                if (isToken)
+                    tokens.push_back(token);
+
+                token.clear();
+                isToken = false;
+            } else {
+                token += ch;
+                isToken = true;
+            }
+        }
+
+        if (isToken)
+            tokens.push_back(token);
+    }
+
+    vector<fs::path> files;
+    for (size_t i = 0; i < tokens.size(); i++) {
+        const string& token = tokens[i];
+        size_t nameBegin = token.find_first_not_of('-');
+        if (nameBegin == 0 || nameBegin > 2 || nameBegin == string::npos)
+            continue;
+
+        size_t equal = token.find('=');
+        string name = token.substr(nameBegin, equal == string::npos ? string::npos : equal - nameBegin);
+        for (const char* fileOption : fileOptions) {
+            if (name != fileOption)
+                continue;
+
+            if (equal != string::npos)
+                files.push_back(token.substr(equal + 1));
+            else if (i + 1 < tokens.size())
+                files.push_back(tokens[++i]);
+        }
+    }
+
+    return files;
 }
 
 static string GetBuildSignature() {
@@ -607,7 +687,15 @@ static string GetBuildSignature() {
         AppendBuildSignatureValue(signature, "metalSdk", g_Options.metalSdk);
         AppendBuildSignatureValue(signature, "metalStd", g_Options.metalStd);
         AppendBuildSignatureValue(signature, "metalMinOS", g_Options.metalMinOS);
-        AppendCompilerBuildSignature(signature, g_Options.metalCompiler, COMPILER_METAL);
+
+        if (g_Options.metalFromDxil) {
+            AppendBuildSignatureValues(signature, "metalShaderConverterOptions", g_Options.metalShaderConverterOptions);
+            for (const fs::path& file : GetMetalShaderConverterInputFiles(g_Options.metalShaderConverterOptions))
+                AppendBuildSignatureValue(signature, "metalShaderConverterInput", PathToString(file) + ":" + to_string(GetFileContentsHash(file)));
+
+            AppendCompilerBuildSignature(signature, g_Options.metalShaderConverter, COMPILER_METAL_SHADER_CONVERTER);
+        } else
+            AppendCompilerBuildSignature(signature, g_Options.metalCompiler, COMPILER_METAL);
     }
 
     return signature.str();
@@ -623,7 +711,7 @@ static string GetBuildSignatureStem() {
     char configHash[17];
     snprintf(configHash, sizeof(configHash), "%016llX", (unsigned long long)HashString(configPath));
 
-    return ".ShaderMake." + string(g_Options.platformName) + "." + configHash;
+    return ".ShaderMake." + string(g_Options.platformName) + (g_Options.metalFromDxil ? "_DXIL." : ".") + configHash;
 }
 
 static fs::path GetBuildSignaturePath() {
@@ -787,10 +875,14 @@ static void Printf(const char* format, ...) {
     fflush(stdout);
 }
 
+static const char* GetPlatformExt() {
+    return g_Options.metalFromDxil ? g_MetalConverterBundleExt : g_PlatformExts[g_Options.platform];
+}
+
 static string GetShaderName(const fs::path& path) {
     string name = path.filename().string();
     replace(name.begin(), name.end(), '.', '_');
-    name += "_" + string(g_PlatformExts[g_Options.platform] + 1);
+    name += "_" + string(GetPlatformExt() + 1);
 
     return "g_" + name;
 }
@@ -1050,6 +1142,40 @@ static bool FindMetalCompiler(const char* xcrun, const char* metalSdk, fs::path&
     return !path.empty() && fs::exists(outPath);
 }
 
+static const char* GetMetalDeploymentOS(const char* metalSdk) {
+    if (strcmp(metalSdk, "macosx") == 0)
+        return "macOS";
+    if (strcmp(metalSdk, "iphoneos") == 0)
+        return "iOS";
+    if (strcmp(metalSdk, "iphonesimulator") == 0)
+        return "iOSSimulator";
+
+    return nullptr;
+}
+
+static bool FindMetalShaderConverter(fs::path& outPath) {
+    const char* paths = getenv("PATH");
+    string pathList = paths ? paths : "";
+    pathList += ":/usr/local/bin";
+
+    size_t begin = 0;
+    while (begin <= pathList.size()) {
+        size_t end = pathList.find(':', begin);
+        if (end == string::npos)
+            end = pathList.size();
+
+        fs::path path = fs::path(pathList.substr(begin, end - begin)) / "metal-shaderconverter";
+        if (end != begin && fs::exists(path)) {
+            outPath = path;
+            return true;
+        }
+
+        begin = end + 1;
+    }
+
+    return false;
+}
+
 static int32_t AddInclude(struct argparse* self, const struct argparse_option* option) {
     ((Options*)(option->data))->includeDirs.push_back(*(const char**)option->value);
     UNUSED(self);
@@ -1080,6 +1206,12 @@ static int32_t AddCompilerOptions(struct argparse* self, const struct argparse_o
     return 0;
 }
 
+static int32_t AddMetalShaderConverterOptions(struct argparse* self, const struct argparse_option* option) {
+    ((Options*)(option->data))->metalShaderConverterOptions.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
+
 static int32_t AddCompilerAlias(struct argparse* self, const struct argparse_option* option) {
     ((Options*)(option->data))->compilerAliasArgs.push_back(*(const char**)option->value);
     UNUSED(self);
@@ -1090,6 +1222,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
     const char* config = nullptr;
     const char* unused = nullptr; // storage for callbacks
     const char* srcDir = "";
+    const char* metalShaderConverterPath = nullptr;
     bool ignoreConfigDir = false;
 
     struct argparse_option options[] = {
@@ -1148,6 +1281,9 @@ bool Options::Parse(int32_t argc, const char** argv) {
         OPT_STRING(0, "metalSdk", &metalSdk, "Xcode SDK: macosx, iphoneos or iphonesimulator (default = macosx)", nullptr, 0, 0),
         OPT_STRING(0, "metalStd", &metalStd, "Metal language standard (default = metal4.0)", nullptr, 0, 0),
         OPT_STRING(0, "metalMinOS", &metalMinOS, "Minimum OS version for the selected SDK (default = 26.0)", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "metalFromDXIL", &metalFromDxil, "Compile HLSL to DXIL, convert it with 'metal-shaderconverter' and output Metal converter bundles", nullptr, 0, 0),
+        OPT_STRING(0, "metalShaderConverter", &metalShaderConverterPath, "Path to 'metal-shaderconverter' (default = found in PATH or /usr/local/bin)", nullptr, 0, 0),
+        OPT_STRING(0, "metalShaderConverterOptions", &unused, "Custom command line options for 'metal-shaderconverter', separated by spaces", AddMetalShaderConverterOptions, (intptr_t)this, 0),
         OPT_END(),
     };
 
@@ -1201,7 +1337,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
 
     if (platform == METAL) {
 #ifdef __APPLE__
-        if (!compiler)
+        if (!compiler && !metalFromDxil)
             compiler = "/usr/bin/xcrun";
 #else
         Printf(RED "ERROR: METAL platform is only supported on macOS!\n");
@@ -1241,12 +1377,34 @@ bool Options::Parse(int32_t argc, const char** argv) {
             return false;
         }
 
-        if (!FindMetalCompiler(compiler, metalSdk, metalCompiler)) {
-            Printf(RED "ERROR: Can't find Metal compiler for SDK '%s' (is the Metal toolchain installed?)!\n", metalSdk);
-            return false;
-        }
+        if (metalFromDxil) {
+            if (metalShaderConverterPath)
+                metalShaderConverter = metalShaderConverterPath;
+            else if (!FindMetalShaderConverter(metalShaderConverter)) {
+                Printf(RED "ERROR: Can't find 'metal-shaderconverter' (use --metalShaderConverter)!\n");
+                return false;
+            }
 
-        compilerType = COMPILER_METAL;
+            if (!fs::exists(metalShaderConverter)) {
+                Printf(RED "ERROR: Metal shader converter '%s' does not exist!\n", PathToString(metalShaderConverter).c_str());
+                return false;
+            }
+        } else {
+            if (!FindMetalCompiler(compiler, metalSdk, metalCompiler)) {
+                Printf(RED "ERROR: Can't find Metal compiler for SDK '%s' (is the Metal toolchain installed?)!\n", metalSdk);
+                return false;
+            }
+
+            compilerType = COMPILER_METAL;
+        }
+    } else if (metalFromDxil) {
+        Printf(RED "ERROR: --metalFromDXIL is only supported for METAL target!\n");
+        return false;
+    }
+
+    if (!metalShaderConverterOptions.empty() && !metalFromDxil) {
+        Printf(RED "ERROR: --metalShaderConverterOptions requires --metalFromDXIL!\n");
+        return false;
     }
 
     for (const string& compilerAliasArg : compilerAliasArgs) {
@@ -1281,7 +1439,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
     if (outputExt)
         g_OutputExt = outputExt;
     else
-        g_OutputExt = g_PlatformExts[platform];
+        g_OutputExt = GetPlatformExt();
 
     if (g_Options.vulkanMemoryLayout && platform != SPIRV) {
         Printf(RED "ERROR: --vulkanMemoryLayout is only supported for SPIRV target!\n");
@@ -1372,6 +1530,12 @@ static int32_t AddCompilerOptionsSPIRV(struct argparse* self, const struct argpa
     return 0;
 }
 
+static int32_t AddLocalMetalShaderConverterOptions(struct argparse* self, const struct argparse_option* option) {
+    ((ConfigLine*)(option->data))->metalShaderConverterOptions.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
+
 bool ConfigLine::Parse(int32_t argc, const char** argv) {
     source = argv[0];
 
@@ -1391,6 +1555,7 @@ bool ConfigLine::Parse(int32_t argc, const char** argv) {
 
         OPT_STRING(0, "compilerOptionsDXIL", &unused, "Custom command line options for dxil, separated by spaces", AddCompilerOptionsDXIL, (intptr_t)this, 0),
         OPT_STRING(0, "compilerOptionsSPIRV", &unused, "Custom command line options for spirv, separated by spaces", AddCompilerOptionsSPIRV, (intptr_t)this, 0),
+        OPT_STRING(0, "metalShaderConverterOptions", &unused, "Custom command line options for 'metal-shaderconverter', separated by spaces", AddLocalMetalShaderConverterOptions, (intptr_t)this, 0),
         OPT_END(),
     };
 
@@ -1407,7 +1572,7 @@ bool ConfigLine::Parse(int32_t argc, const char** argv) {
         shaderModel = g_Options.shaderModel;
 
     // A ".metallib" is a library with any number of functions
-    if (!profile && g_Options.platform == METAL)
+    if (!profile && g_Options.platform == METAL && !g_Options.metalFromDxil)
         profile = "lib";
 
     // If there are some non-option elements in the config line, they will remain in the argv array.
@@ -1469,6 +1634,37 @@ static bool TryReserveRetry() {
     return false;
 }
 
+static bool WriteMetalConverterBundle(const string& metallibFile, const string& reflectionFile, const string& outputFile, ostringstream& msg) {
+    vector<uint8_t> metallib;
+    vector<uint8_t> reflection;
+    if (!ReadBinaryFile(metallibFile.c_str(), metallib) || !ReadBinaryFile(reflectionFile.c_str(), reflection)) {
+        msg << "ERROR: Can't read 'metal-shaderconverter' output!\n";
+        return false;
+    }
+
+    // Layout: header, metallib (8-byte aligned), reflection JSON, zero terminator
+    ShaderMake::MetalConverterBundleHeader header = {};
+    header.magic = ShaderMake::MetalConverterBundleMagic;
+    header.version = ShaderMake::MetalConverterBundleVersion;
+    header.metallibOffset = (uint32_t)((sizeof(header) + 7) & ~size_t(7));
+    header.metallibSize = (uint32_t)metallib.size();
+    header.reflectionOffset = header.metallibOffset + header.metallibSize;
+    header.reflectionSize = (uint32_t)reflection.size();
+
+    vector<uint8_t> bundle(header.reflectionOffset + reflection.size() + 1);
+    memcpy(bundle.data(), &header, sizeof(header));
+    memcpy(bundle.data() + header.metallibOffset, metallib.data(), metallib.size());
+    memcpy(bundle.data() + header.reflectionOffset, reflection.data(), reflection.size());
+
+    DataOutputContext context(outputFile.c_str(), false);
+    if (!context.stream || !context.WriteDataAsBinary(bundle.data(), bundle.size())) {
+        msg << "ERROR: Can't write '" << outputFile << "'!\n";
+        return false;
+    }
+
+    return true;
+}
+
 static void ExeCompile() {
     static const char* optimizationLevelRemap[] = {
         " -Od",
@@ -1490,6 +1686,11 @@ static void ExeCompile() {
         }
 
         string outputFile = taskData.outputFileWithoutExt + g_OutputExt;
+
+        // METAL from DXIL: intermediate files for the bundle, next to the output
+        string compilerOutputFile = g_Options.metalFromDxil ? outputFile + ".dxil" : outputFile;
+        string metallibFile = outputFile + ".metallib";
+        string reflectionFile = outputFile + ".json";
 
         // Building command line
         ostringstream cmd;
@@ -1636,7 +1837,7 @@ static void ExeCompile() {
                 cmd << " -nologo";
 
                 // Output file
-                cmd << " -Fo " << EscapePath(outputFile);
+                cmd << " -Fo " << EscapePath(compilerOutputFile);
 
                 // Profile
                 string profile = taskData.profile + "_";
@@ -1720,7 +1921,7 @@ static void ExeCompile() {
                 AppendCompilerOptions(cmd, taskData.compilerOptions, taskData.compilerType);
 
                 // Platform-specific custom options
-                if (g_Options.platform == DXIL)
+                if (g_Options.platform == DXIL || g_Options.metalFromDxil)
                     AppendCompilerOptions(cmd, taskData.compilerOptionsDXIL, taskData.compilerType);
                 else if (g_Options.platform == SPIRV)
                     AppendCompilerOptions(cmd, taskData.compilerOptionsSPIRV, taskData.compilerType);
@@ -1729,6 +1930,28 @@ static void ExeCompile() {
             // Source file
             fs::path sourceFile = g_Options.sourceDir / taskData.source;
             cmd << " " << EscapePath(sourceFile.string());
+
+            // METAL from DXIL: conversion, custom options are passed as is
+            if (g_Options.metalFromDxil) {
+                cmd << " 2>&1 && " << EscapePath(PathToString(g_Options.metalShaderConverter));
+                cmd << " " << EscapePath(compilerOutputFile);
+                cmd << " --entry-point=" << taskData.entryPoint;
+                cmd << " --deployment-os=" << GetMetalDeploymentOS(g_Options.metalSdk);
+                cmd << " --minimum-os-build-version=" << g_Options.metalMinOS;
+
+                // The converter expects "major.minor.patch"
+                const char* metalMinOS = g_Options.metalMinOS;
+                for (ptrdiff_t dots = count(metalMinOS, metalMinOS + strlen(metalMinOS), '.'); dots < 2; dots++)
+                    cmd << ".0";
+
+                cmd << " -o " << EscapePath(metallibFile);
+                cmd << " " << EscapePath("--output-reflection-file=" + reflectionFile);
+
+                for (const vector<string>* options : {&g_Options.metalShaderConverterOptions, &taskData.metalShaderConverterOptions}) {
+                    for (const string& option : *options)
+                        cmd << " " << option;
+                }
+            }
         }
 
         cmd << " 2>&1";
@@ -1770,6 +1993,17 @@ static void ExeCompile() {
                 willRetry = true;
         } else
             willRetry = TryReserveRetry();
+
+        // Bundle converter output
+        if (g_Options.metalFromDxil) {
+            if (isSucceeded && !WriteMetalConverterBundle(metallibFile, reflectionFile, outputFile, msg))
+                isSucceeded = false;
+
+            error_code errorCode;
+            fs::remove(compilerOutputFile, errorCode);
+            fs::remove(metallibFile, errorCode);
+            fs::remove(reflectionFile, errorCode);
+        }
 
         // Convert to headers if needed
         if (isSucceeded && (g_Options.header || (g_Options.headerBlob && taskData.combinedDefines.empty()))) {
@@ -1905,7 +2139,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
         return true;
 
     const char* compilerAliasName = nullptr;
-    if (g_Options.platform == DXIL)
+    if (g_Options.platform == DXIL || g_Options.metalFromDxil)
         compilerAliasName = configLine.compilerDXIL;
     else if (g_Options.platform == SPIRV)
         compilerAliasName = configLine.compilerSPIRV;
@@ -1921,6 +2155,11 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     }
 
     CompilerType compilerType = compilerAlias ? compilerAlias->type : g_Options.compilerType;
+    if (compilerType == COMPILER_SLANG && g_Options.metalFromDxil) {
+        Printf(RED "%s(%u,0): ERROR: Slang is not supported by --metalFromDXIL!\n", PathToString(g_Options.configFile).c_str(), lineIndex + 1);
+        return false;
+    }
+
     if (compilerType == COMPILER_SLANG && g_Options.platform == SPIRV) {
         if (!GetSlangSpirvCapability(g_Options.vulkanVersion)) {
             Printf(RED
@@ -2080,6 +2319,17 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
             return false;
 
         sourceTime = max(sourceTime, configTime);
+
+        // Global converter input files are tracked by the build signature
+        if (g_Options.metalFromDxil) {
+            for (const fs::path& file : GetMetalShaderConverterInputFiles(configLine.metalShaderConverterOptions)) {
+                error_code errorCode;
+                fs::file_time_type fileTime = fs::last_write_time(file, errorCode);
+                if (!errorCode)
+                    sourceTime = max(sourceTime, fileTime);
+            }
+        }
+
         if (outputTime > sourceTime)
             return true;
     }
@@ -2109,6 +2359,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     taskData.compilerOptionsSPIRV = configLine.compilerOptionsSPIRV;
     taskData.optimizationLevel = optimizationLevel;
     taskData.noRegShifts = configLine.noRegShifts;
+    taskData.metalShaderConverterOptions = configLine.metalShaderConverterOptions;
 
     // Gather blobs
     if (g_Options.IsBlob()) {
