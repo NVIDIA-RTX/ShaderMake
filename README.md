@@ -2,11 +2,11 @@
 
 [![Build Status](https://github.com/NVIDIA-RTX/ShaderMake/actions/workflows/build.yml/badge.svg)](https://github.com/NVIDIA-RTX/ShaderMake/actions/workflows/build.yml)
 
-ShaderMake is a front-end tool for batch multi-threaded shader compilation developed by NVIDIA DevTech. It is compatible with Microsoft *FXC* and *DXC* compilers by calling them via API functions or executing them through command line, and with [Slang](https://github.com/shader-slang/slang) through command line only.
+ShaderMake is a front-end tool for batch multi-threaded shader compilation developed by NVIDIA DevTech. It is compatible with Microsoft *FXC* and *DXC* compilers by calling them via API functions or executing them through command line, with [Slang](https://github.com/shader-slang/slang) through command line only, and with the *Metal* compiler from *Xcode* (via `xcrun`) on *macOS*.
 
 Features:
 
-- Generates *DXBC*, *DXIL* and *SPIR-V* using *FXC*, *DXC* or *Slang* where supported;
+- Generates *DXBC*, *DXIL* and *SPIR-V* using *FXC*, *DXC* or *Slang* where supported, and *Metal* libraries from *Metal Shading Language* sources;
 - Output formats: a native binary, a header file, and a binary or header [blob](#user-content-shader-blob) (containing all permutations for a given input shader file);
 - Minimizes the number of re-compilation tasks by tracking file modification times, include trees, compiler executables and recognized runtime libraries, and global code-generation settings.
 
@@ -30,7 +30,7 @@ If either `SHADERMAKE_DXC_PATH` or `SHADERMAKE_DXC_VK_PATH` is empty during depl
 Usage:
 
 ```
-ShaderMake.exe -p {DXBC|DXIL|SPIRV} [-b] [-h] [-B] [-H] -c "path/to/config"
+ShaderMake.exe -p {DXBC|DXIL|SPIRV|METAL} [-b] [-h] [-B] [-H] -c "path/to/config"
         -o "path/to/output" --compiler "path/to/compiler" [--compilerAlias "NAME=path"] [other options]
         -D DEF1 -D DEF2=1 ... -I "path1" -I "path2" ...
 
@@ -38,24 +38,24 @@ ShaderMake.exe -p {DXBC|DXIL|SPIRV} [-b] [-h] [-B] [-H] -c "path/to/config"
 ```
 
 Required inputs and output selection:
-- `-p, --platform` (string) - *DXBC*, *DXIL* or *SPIRV*
+- `-p, --platform` (string) - *DXBC*, *DXIL*, *SPIRV* or *METAL* (*macOS* only)
 - `-c, --config` (string) - Configuration file with the list of shaders to compile
 - `-o, --out` (string) - Output directory
 - `-b, --binary` - Output binary files
 - `-h, --header` - Output header files
 - `-B, --binaryBlob` - Output binary blob files
 - `-H, --headerBlob` - Output header blob files
-- `--compiler` (string) - Path to an *FXC/DXC/Slang* compiler. An executable named `slangc` is detected automatically
+- `--compiler` (string) - Path to an *FXC/DXC/Slang* compiler. An executable named `slangc` is detected automatically. For *METAL*, path to `xcrun` (optional, default = `/usr/bin/xcrun`)
 
 Compiler settings:
 - `--compilerAlias` (string) - Register `DXC` or `SLANG` as `NAME=path` for selection by config-local `--compilerDXIL` and `--compilerSPIRV`; names are case-insensitive and each alias may be registered once
 - `-m, --shaderModel` (string) - Shader model for *DXIL/SPIRV* (always SM 5.0 for *DXBC*) in 'X_Y' format
 - `-O, --optimization` (int) - Optimization level 0-3 (default = 3, disabled = 0)
 - `-X, --compilerOptions` (string) - Custom command line options for the compiler, separated by spaces
-- `--WX` - Treat warnings as errors (`-WX` for *DXC/FXC*, `-warnings-as-errors all` for *Slang*)
+- `--WX` - Treat warnings as errors (`-WX` for *DXC/FXC*, `-warnings-as-errors all` for *Slang*, `-Werror` for *Metal*)
 - `--allResourcesBound` - Maps to `-all_resources_bound` *DXC/FXC* option: all resources bound
-- `--PDB` - Output PDB files in `out/PDB/`; ShaderMake does not currently support separate PDB output with Slang, so debug information remains in the shader binary
-- `--embedPDB` - Embed PDB with the shader binary
+- `--PDB` - Output PDB files in `out/PDB/`; ShaderMake does not currently support separate PDB output with Slang, so debug information remains in the shader binary. For *METAL*, debug information and sources are written into a `.metallibsym` file next to the output
+- `--embedPDB` - Embed PDB with the shader binary (for *METAL*, debug information and sources are embedded into the library)
 - `--stripReflection` - Maps to `-Qstrip_reflect` *DXC/FXC* option: strip reflection information from a shader binary
 - `--matrixRowMajor` - Maps to `-Zpr` *DXC/FXC* option: pack matrices in row-major order
 - `--hlsl2021` - Maps to `-HV 2021` *DXC* option: enable HLSL 2021 standard
@@ -71,7 +71,7 @@ Other options:
 - `--project` (string) - Project name used in informational output
 - `--sourceDir` (string) - Source code directory
 - `--relaxedInclude` (string) - Include file(s) not invoking re-compilation
-- `--outputExt` (string) - Extension for output files, default is one of `.dxbc`, `.dxil`, `.spirv`
+- `--outputExt` (string) - Extension for output files, default is one of `.dxbc`, `.dxil`, `.spirv`, `.metallib`
 - `--serial` - Disable multi-threading
 - `-j, --jobs` (int) - Maximum number of parallel compilation tasks; `0` uses the number of logical processors (default = `0`)
 - `--flatten` - Flatten source directory structure in the output directory
@@ -92,10 +92,18 @@ Other options:
 - `--uRegShift` (int) - register shift for UAV (`u#`) resources
 - `--noRegShifts` - Don't specify any register shifts for the compiler
 
+*METAL* options:
+- `--metalSdk` (string) - *Xcode* SDK: `macosx`, `iphoneos` or `iphonesimulator` (default = `macosx`)
+- `--metalStd` (string) - Metal language standard (default = `metal4.0`)
+- `--metalMinOS` (string) - Minimum OS version for the selected SDK (default = `26.0`, required by `metal4.0`)
+
+*METAL* compiles each shader into a `.metallib` using `xcrun -sdk <sdk> metal`, which may contain any number of functions. Defines, include directories, optimization level (`-O0..3`), `--WX` and custom compiler options are passed to the compiler. `-T` is optional, `-E` and `-m` don't affect compilation, *HLSL*-specific options are ignored. Unresolved `<...>` includes are treated as toolchain headers.
+
 ShaderMake makes implicit definitions available in config files and shader sources, matching real compiler definitions:
 
 - `__SLANG__` matches the definition exposed by *Slang* and is added when that compiler is selected
 - `__spirv__` matches the *DXC* SPIR-V target definition and is added for every *SPIR-V* compiler
+- `__METAL__` matches the *Metal* compiler definition and is available in config files for *METAL*
 
 When *Slang* is selected, ShaderMake translates these known *DXC* SPIR-V options to their *Slang* equivalents:
 
@@ -118,7 +126,7 @@ path/to/shader -T profile [-O3] [-o "output/subdirectory"] [-E entry] [--compile
 
 where:
 - `path/to/shader` (string) - shader source file
-- `-T, --profile` (string) - shader profile, can be:
+- `-T, --profile` (string) - shader profile (optional for *METAL*), can be:
   - `vs` - vertex
   - `ps` - pixel
   - `gs` - geometry

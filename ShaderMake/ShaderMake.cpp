@@ -80,6 +80,7 @@ enum Platform : uint8_t {
     DXBC,
     DXIL,
     SPIRV,
+    METAL,
 
     PLATFORMS_NUM
 };
@@ -88,6 +89,7 @@ enum CompilerType : uint8_t {
     COMPILER_FXC,
     COMPILER_DXC,
     COMPILER_SLANG,
+    COMPILER_METAL,
 };
 
 struct CompilerAlias {
@@ -105,6 +107,7 @@ struct Options {
     vector<string> compilerAliasArgs;
     vector<CompilerAlias> compilerAliases;
     fs::path configFile;
+    fs::path metalCompiler;
     fs::path sourceDir;
     const char* projectName = "";
     const char* platformName = nullptr;
@@ -114,6 +117,9 @@ struct Options {
     const char* compiler = nullptr;
     const char* outputExt = nullptr;
     const char* vulkanMemoryLayout = nullptr;
+    const char* metalSdk = "macosx";
+    const char* metalStd = "metal4.0";
+    const char* metalMinOS = "26.0";
     uint32_t sRegShift = 100;
     uint32_t tRegShift = 200;
     uint32_t bRegShift = 300;
@@ -217,16 +223,18 @@ atomic<uint32_t> g_FailedTaskCount = 0;
 uint32_t g_OriginalTaskCount;
 const char* g_OutputExt = nullptr;
 
-std::array<const char*, 3> g_PlatformNames = {
+std::array<const char*, PLATFORMS_NUM> g_PlatformNames = {
     "DXBC",
     "DXIL",
     "SPIRV",
+    "METAL",
 };
 
-std::array<const char*, 3> g_PlatformExts = {
+std::array<const char*, PLATFORMS_NUM> g_PlatformExts = {
     ".dxbc",
     ".dxil",
     ".spirv",
+    ".metallib",
 };
 
 std::array<const char*, 3> g_PlatformSlangTargets = {
@@ -361,6 +369,8 @@ static bool HasConfigDefine(const char* name) {
         return g_Options.compilerType == COMPILER_SLANG;
     if (strcmp(name, "__spirv__") == 0)
         return g_Options.platform == SPIRV;
+    if (strcmp(name, "__METAL__") == 0)
+        return g_Options.platform == METAL;
 
     return false;
 }
@@ -591,6 +601,13 @@ static string GetBuildSignature() {
         AppendBuildSignatureValue(signature, "uRegShift", to_string(g_Options.uRegShift));
         AppendBuildSignatureValue(signature, "noRegShifts", to_string(g_Options.noRegShifts));
         AppendBuildSignatureValues(signature, "spirvExtension", g_Options.spirvExtensions);
+    }
+
+    if (g_Options.platform == METAL) {
+        AppendBuildSignatureValue(signature, "metalSdk", g_Options.metalSdk);
+        AppendBuildSignatureValue(signature, "metalStd", g_Options.metalStd);
+        AppendBuildSignatureValue(signature, "metalMinOS", g_Options.metalMinOS);
+        AppendCompilerBuildSignature(signature, g_Options.metalCompiler, COMPILER_METAL);
     }
 
     return signature.str();
@@ -1004,6 +1021,35 @@ static uint32_t GetVulkanMaxSpirvVersion(const char* vulkanVersion) {
     return 106;
 }
 
+static const char* GetMetalMinOSOption(const char* metalSdk) {
+    if (strcmp(metalSdk, "macosx") == 0)
+        return "-mmacosx-version-min=";
+    if (strcmp(metalSdk, "iphoneos") == 0)
+        return "-mios-version-min=";
+    if (strcmp(metalSdk, "iphonesimulator") == 0)
+        return "-mios-simulator-version-min=";
+
+    return nullptr;
+}
+
+static bool FindMetalCompiler(const char* xcrun, const char* metalSdk, fs::path& outPath) {
+    string cmd = EscapePath(xcrun) + " -sdk " + metalSdk + " -find metal 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe)
+        return false;
+
+    char buf[BUF_SIZE] = {};
+    bool isRead = fgets(buf, sizeof(buf), pipe) != nullptr;
+    if (pclose(pipe) != 0 || !isRead)
+        return false;
+
+    string path = buf;
+    path.erase(find_if(path.rbegin(), path.rend(), [](char ch) { return !IsSpace(ch); }).base(), path.end());
+    outPath = path;
+
+    return !path.empty() && fs::exists(outPath);
+}
+
 static int32_t AddInclude(struct argparse* self, const struct argparse_option* option) {
     ((Options*)(option->data))->includeDirs.push_back(*(const char**)option->value);
     UNUSED(self);
@@ -1049,14 +1095,14 @@ bool Options::Parse(int32_t argc, const char** argv) {
     struct argparse_option options[] = {
         OPT_HELP(),
         OPT_GROUP("Required options:"),
-        OPT_STRING('p', "platform", &platformName, "DXBC, DXIL or SPIRV", nullptr, 0, 0),
+        OPT_STRING('p', "platform", &platformName, "DXBC, DXIL, SPIRV or METAL", nullptr, 0, 0),
         OPT_STRING('c', "config", &config, "Configuration file with the list of shaders to compile", nullptr, 0, 0),
         OPT_STRING('o', "out", &outputDir, "Output directory", nullptr, 0, 0),
         OPT_BOOLEAN('b', "binary", &binary, "Output binary files", nullptr, 0, 0),
         OPT_BOOLEAN('h', "header", &header, "Output header files", nullptr, 0, 0),
         OPT_BOOLEAN('B', "binaryBlob", &binaryBlob, "Output binary blob files", nullptr, 0, 0),
         OPT_BOOLEAN('H', "headerBlob", &headerBlob, "Output header blob files", nullptr, 0, 0),
-        OPT_STRING(0, "compiler", &compiler, "Path to an FXC/DXC/Slang compiler executable", nullptr, 0, 0),
+        OPT_STRING(0, "compiler", &compiler, "Path to an FXC/DXC/Slang compiler executable (xcrun for METAL, default = /usr/bin/xcrun)", nullptr, 0, 0),
         OPT_GROUP("Compiler settings:"),
         OPT_STRING(0, "compilerAlias", &unused, "Alternate compiler for config-local selection in NAME=path form", AddCompilerAlias, (intptr_t)this, 0),
         OPT_STRING('m', "shaderModel", &shaderModel, "Shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
@@ -1079,7 +1125,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
         OPT_STRING(0, "project", &projectName, "Project name to be seen in informational output", nullptr, 0, 0),
         OPT_STRING(0, "sourceDir", &srcDir, "Source code directory", nullptr, 0, 0),
         OPT_STRING(0, "relaxedInclude", &unused, "Include file(s) not invoking re-compilation", AddRelaxedInclude, (intptr_t)this, 0),
-        OPT_STRING(0, "outputExt", &outputExt, "Extension for output files, default is one of .dxbc, .dxil, .spirv", nullptr, 0, 0),
+        OPT_STRING(0, "outputExt", &outputExt, "Extension for output files, default is one of .dxbc, .dxil, .spirv, .metallib", nullptr, 0, 0),
         OPT_BOOLEAN(0, "serial", &serial, "Disable multi-threading", nullptr, 0, 0),
         OPT_INTEGER('j', "jobs", &jobs, "Maximum number of parallel compilation tasks (default = number of logical processors)", nullptr, 0, 0),
         OPT_BOOLEAN(0, "flatten", &flatten, "Flatten source directory structure in the output directory", nullptr, 0, 0),
@@ -1098,11 +1144,15 @@ bool Options::Parse(int32_t argc, const char** argv) {
         OPT_INTEGER(0, "bRegShift", &bRegShift, "SPIRV: register shift for constant (b#) resources", nullptr, 0, 0),
         OPT_INTEGER(0, "uRegShift", &uRegShift, "SPIRV: register shift for UAV (u#) resources", nullptr, 0, 0),
         OPT_BOOLEAN(0, "noRegShifts", &noRegShifts, "Don't specify any register shifts for the compiler", nullptr, 0, 0),
+        OPT_GROUP("METAL options:"),
+        OPT_STRING(0, "metalSdk", &metalSdk, "Xcode SDK: macosx, iphoneos or iphonesimulator (default = macosx)", nullptr, 0, 0),
+        OPT_STRING(0, "metalStd", &metalStd, "Metal language standard (default = metal4.0)", nullptr, 0, 0),
+        OPT_STRING(0, "metalMinOS", &metalMinOS, "Minimum OS version for the selected SDK (default = 26.0)", nullptr, 0, 0),
         OPT_END(),
     };
 
     static const char* usages[] = {
-        "ShaderMake.exe -p {DXBC|DXIL|SPIRV} [-b] [-h] [-B] [-H] -c \"path/to/config\"\n"
+        "ShaderMake.exe -p {DXBC|DXIL|SPIRV|METAL} [-b] [-h] [-B] [-H] -c \"path/to/config\"\n"
         "\t-o \"path/to/output\" --compiler \"path/to/compiler\" [--compilerAlias \"NAME=path\"] [other options]\n"
         "\t-D DEF1 -D DEF2=1 ... -I \"path1\" -I \"path2\" ...",
         nullptr};
@@ -1136,6 +1186,29 @@ bool Options::Parse(int32_t argc, const char** argv) {
         return false;
     }
 
+    // Platform
+    uint32_t i = 0;
+    for (; i < PLATFORMS_NUM; i++) {
+        if (!strcmp(platformName, g_PlatformNames[i])) {
+            platform = (Platform)i;
+            break;
+        }
+    }
+    if (i == PLATFORMS_NUM) {
+        Printf(RED "ERROR: Unrecognized platform '%s'!\n", platformName);
+        return false;
+    }
+
+    if (platform == METAL) {
+#ifdef __APPLE__
+        if (!compiler)
+            compiler = "/usr/bin/xcrun";
+#else
+        Printf(RED "ERROR: METAL platform is only supported on macOS!\n");
+        return false;
+#endif
+    }
+
     if (!compiler) {
         Printf(RED "ERROR: Compiler not specified!\n");
         return false;
@@ -1153,22 +1226,28 @@ bool Options::Parse(int32_t argc, const char** argv) {
         return false;
     }
 
-    // Platform
-    uint32_t i = 0;
-    for (; i < PLATFORMS_NUM; i++) {
-        if (!strcmp(platformName, g_PlatformNames[i])) {
-            platform = (Platform)i;
-            break;
-        }
-    }
-    if (i == PLATFORMS_NUM) {
-        Printf(RED "ERROR: Unrecognized platform '%s'!\n", platformName);
-        return false;
-    }
-
     // Keep --slang as an explicit override for wrappers and non-standard executable names.
     slang = slang || IsSlangCompiler(compiler);
     compilerType = slang ? COMPILER_SLANG : (platform == DXBC ? COMPILER_FXC : COMPILER_DXC);
+
+    if (platform == METAL) {
+        if (slang) {
+            Printf(RED "ERROR: Slang is not supported for METAL target!\n");
+            return false;
+        }
+
+        if (!GetMetalMinOSOption(metalSdk)) {
+            Printf(RED "ERROR: Unsupported value '%s' for --metalSdk! Only 'macosx', 'iphoneos' and 'iphonesimulator' are supported.\n", metalSdk);
+            return false;
+        }
+
+        if (!FindMetalCompiler(compiler, metalSdk, metalCompiler)) {
+            Printf(RED "ERROR: Can't find Metal compiler for SDK '%s' (is the Metal toolchain installed?)!\n", metalSdk);
+            return false;
+        }
+
+        compilerType = COMPILER_METAL;
+    }
 
     for (const string& compilerAliasArg : compilerAliasArgs) {
         size_t separatorPos = compilerAliasArg.find('=');
@@ -1327,6 +1406,10 @@ bool ConfigLine::Parse(int32_t argc, const char** argv) {
     if (!shaderModel)
         shaderModel = g_Options.shaderModel;
 
+    // A ".metallib" is a library with any number of functions
+    if (!profile && g_Options.platform == METAL)
+        profile = "lib";
+
     // If there are some non-option elements in the config line, they will remain in the argv array.
     if (argv[0]) {
         Printf(RED "ERROR: Unrecognized element in the config line: '%s'!\n", argv[0]);
@@ -1413,7 +1496,45 @@ static void ExeCompile() {
         {
             cmd << EscapePath(taskData.compiler);
 
-            if (taskData.compilerType == COMPILER_SLANG) {
+            if (taskData.compilerType == COMPILER_METAL) {
+                // The "metal" driver compiles and links in one step, intermediate ".air" files are managed by the driver
+                cmd << " -sdk " << g_Options.metalSdk << " metal";
+
+                // Output
+                cmd << " -o " << EscapePath(outputFile);
+
+                // Language standard and deployment target
+                cmd << " -std=" << g_Options.metalStd;
+                cmd << " " << GetMetalMinOSOption(g_Options.metalSdk) << g_Options.metalMinOS;
+
+                // Defines
+                for (const string& define : taskData.defines)
+                    cmd << " -D" << define;
+
+                for (const string& define : g_Options.defines)
+                    cmd << " -D" << define;
+
+                // Include directories
+                for (const fs::path& dir : g_Options.includeDirs)
+                    cmd << " -I " << EscapePath(dir.string());
+
+                // Optimization level
+                cmd << " -O" << taskData.optimizationLevel;
+
+                // Warnings as errors
+                if (g_Options.warningsAreErrors)
+                    cmd << " -Werror";
+
+                // Debug info with sources, embedded or in a separate ".metallibsym" file next to the output
+                if (g_Options.embedPdb)
+                    cmd << " -gline-tables-only -frecord-sources";
+                else if (g_Options.pdb)
+                    cmd << " -gline-tables-only -frecord-sources=flat";
+
+                // Custom options
+                AppendCompilerOptions(cmd, g_Options.compilerOptions, taskData.compilerType);
+                AppendCompilerOptions(cmd, taskData.compilerOptions, taskData.compilerType);
+            } else if (taskData.compilerType == COMPILER_SLANG) {
                 // Slang defaults to slang language mode unless -lang <other language> sets something else.
                 // For HLSL compatibility mode:
                 //    - use -lang hlsl to set language mode to HLSL
@@ -1690,7 +1811,7 @@ static void ExeCompile() {
 //=====================================================================================================================
 
 static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& callStack, fs::file_time_type& outTime) {
-    static const basic_regex<char> includePattern("\\s*#include\\s+[\"<]([^>\"]+)[>\"].*");
+    static const basic_regex<char> includePattern("\\s*#include\\s+([\"<])([^>\"]+)[>\"].*");
 
     auto found = g_HierarchicalUpdateTimes.find(file);
     if (found != g_HierarchicalUpdateTimes.end()) {
@@ -1719,7 +1840,7 @@ static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& call
         if (matchResult.empty())
             continue;
 
-        fs::path includeName = string(matchResult[1]);
+        fs::path includeName = string(matchResult[2]);
         if (find(g_Options.relaxedIncludes.begin(), g_Options.relaxedIncludes.end(), includeName) != g_Options.relaxedIncludes.end())
             continue;
 
@@ -1736,6 +1857,10 @@ static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& call
                 }
             }
         }
+
+        // Metal standard headers are provided by the toolchain
+        if (!isFound && g_Options.platform == METAL && matchResult[1] == "<")
+            continue;
 
         if (!isFound) {
             Printf(RED "ERROR: Can't find include file '%s', included in:\n", PathToString(includeName).c_str());
@@ -1884,7 +2009,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     // Create intermediate output directories
     bool force = g_Options.force || compilerAliasBuildSignatureChanged;
     fs::path endPath = outputDir / shaderName.parent_path();
-    if (g_Options.pdb && compilerType != COMPILER_SLANG)
+    if (g_Options.pdb && compilerType != COMPILER_SLANG && compilerType != COMPILER_METAL)
         endPath /= PDB_DIR;
     if (endPath.string() != "" && !fs::exists(endPath)) {
         fs::create_directories(endPath);
