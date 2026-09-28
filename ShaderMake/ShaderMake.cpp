@@ -1124,6 +1124,7 @@ static const char* GetMetalMinOSOption(const char* metalSdk) {
     return nullptr;
 }
 
+#ifndef _WIN32
 static bool FindMetalCompiler(const char* xcrun, const char* metalSdk, fs::path& outPath) {
     string cmd = EscapePath(xcrun) + " -sdk " + metalSdk + " -find metal 2>/dev/null";
     FILE* pipe = popen(cmd.c_str(), "r");
@@ -1141,6 +1142,7 @@ static bool FindMetalCompiler(const char* xcrun, const char* metalSdk, fs::path&
 
     return !path.empty() && fs::exists(outPath);
 }
+#endif
 
 static const char* GetMetalDeploymentOS(const char* metalSdk) {
     if (strcmp(metalSdk, "macosx") == 0)
@@ -1153,18 +1155,32 @@ static const char* GetMetalDeploymentOS(const char* metalSdk) {
     return nullptr;
 }
 
-static bool FindMetalShaderConverter(fs::path& outPath) {
+// Windows: "%PROGRAMFILES%\<installDir>\bin", then PATH. Others: PATH, then "/usr/local/bin"
+static bool FindMetalTool(const char* name, const char* installDir, fs::path& outPath) {
     const char* paths = getenv("PATH");
+#ifdef _WIN32
+    const char* programFiles = getenv("PROGRAMFILES");
+    string pathList = programFiles ? string(programFiles) + "\\" + installDir + "\\bin;" : "";
+    pathList += paths ? paths : "";
+
+    const char separator = ';';
+    string fileName = string(name) + ".exe";
+#else
     string pathList = paths ? paths : "";
     pathList += ":/usr/local/bin";
 
+    const char separator = ':';
+    string fileName = name;
+    UNUSED(installDir);
+#endif
+
     size_t begin = 0;
     while (begin <= pathList.size()) {
-        size_t end = pathList.find(':', begin);
+        size_t end = pathList.find(separator, begin);
         if (end == string::npos)
             end = pathList.size();
 
-        fs::path path = fs::path(pathList.substr(begin, end - begin)) / "metal-shaderconverter";
+        fs::path path = fs::path(pathList.substr(begin, end - begin)) / fileName;
         if (end != begin && fs::exists(path)) {
             outPath = path;
             return true;
@@ -1235,7 +1251,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
         OPT_BOOLEAN('h', "header", &header, "Output header files", nullptr, 0, 0),
         OPT_BOOLEAN('B', "binaryBlob", &binaryBlob, "Output binary blob files", nullptr, 0, 0),
         OPT_BOOLEAN('H', "headerBlob", &headerBlob, "Output header blob files", nullptr, 0, 0),
-        OPT_STRING(0, "compiler", &compiler, "Path to an FXC/DXC/Slang compiler executable (xcrun for METAL, default = /usr/bin/xcrun)", nullptr, 0, 0),
+        OPT_STRING(0, "compiler", &compiler, "Path to an FXC/DXC/Slang compiler executable (METAL: xcrun on macOS, default = /usr/bin/xcrun, metal.exe on Windows, default = found in Program Files or PATH)", nullptr, 0, 0),
         OPT_GROUP("Compiler settings:"),
         OPT_STRING(0, "compilerAlias", &unused, "Alternate compiler for config-local selection in NAME=path form", AddCompilerAlias, (intptr_t)this, 0),
         OPT_STRING('m', "shaderModel", &shaderModel, "Shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
@@ -1278,11 +1294,11 @@ bool Options::Parse(int32_t argc, const char** argv) {
         OPT_INTEGER(0, "uRegShift", &uRegShift, "SPIRV: register shift for UAV (u#) resources", nullptr, 0, 0),
         OPT_BOOLEAN(0, "noRegShifts", &noRegShifts, "Don't specify any register shifts for the compiler", nullptr, 0, 0),
         OPT_GROUP("METAL options:"),
-        OPT_STRING(0, "metalSdk", &metalSdk, "Xcode SDK: macosx, iphoneos or iphonesimulator (default = macosx)", nullptr, 0, 0),
+        OPT_STRING(0, "metalSdk", &metalSdk, "Target SDK: macosx, iphoneos or iphonesimulator (default = macosx)", nullptr, 0, 0),
         OPT_STRING(0, "metalStd", &metalStd, "Metal language standard (default = metal4.0)", nullptr, 0, 0),
         OPT_STRING(0, "metalMinOS", &metalMinOS, "Minimum OS version for the selected SDK (default = 26.0)", nullptr, 0, 0),
         OPT_BOOLEAN(0, "metalFromDXIL", &metalFromDxil, "Compile HLSL to DXIL, convert it with 'metal-shaderconverter' and output Metal converter bundles", nullptr, 0, 0),
-        OPT_STRING(0, "metalShaderConverter", &metalShaderConverterPath, "Path to 'metal-shaderconverter' (default = found in PATH or /usr/local/bin)", nullptr, 0, 0),
+        OPT_STRING(0, "metalShaderConverter", &metalShaderConverterPath, "Path to 'metal-shaderconverter' (default = found in PATH or /usr/local/bin, on Windows in Program Files or PATH)", nullptr, 0, 0),
         OPT_STRING(0, "metalShaderConverterOptions", &unused, "Custom command line options for 'metal-shaderconverter', separated by spaces", AddMetalShaderConverterOptions, (intptr_t)this, 0),
         OPT_END(),
     };
@@ -1339,8 +1355,19 @@ bool Options::Parse(int32_t argc, const char** argv) {
 #ifdef __APPLE__
         if (!compiler && !metalFromDxil)
             compiler = "/usr/bin/xcrun";
+#elif defined(_WIN32)
+        static string metalCompilerPath;
+        if (!compiler && !metalFromDxil) {
+            if (!FindMetalTool("metal", "Metal Developer Tools", metalCompiler)) {
+                Printf(RED "ERROR: Can't find 'metal.exe' (install Metal Developer Tools for Windows or use --compiler)!\n");
+                return false;
+            }
+
+            metalCompilerPath = PathToString(metalCompiler);
+            compiler = metalCompilerPath.c_str();
+        }
 #else
-        Printf(RED "ERROR: METAL platform is only supported on macOS!\n");
+        Printf(RED "ERROR: METAL platform is only supported on macOS and Windows!\n");
         return false;
 #endif
     }
@@ -1380,7 +1407,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
         if (metalFromDxil) {
             if (metalShaderConverterPath)
                 metalShaderConverter = metalShaderConverterPath;
-            else if (!FindMetalShaderConverter(metalShaderConverter)) {
+            else if (!FindMetalTool("metal-shaderconverter", "Metal Shader Converter", metalShaderConverter)) {
                 Printf(RED "ERROR: Can't find 'metal-shaderconverter' (use --metalShaderConverter)!\n");
                 return false;
             }
@@ -1390,10 +1417,15 @@ bool Options::Parse(int32_t argc, const char** argv) {
                 return false;
             }
         } else {
+#ifdef _WIN32
+            // No SDKs on Windows: "metal.exe" is the driver, "--metalSdk" only selects the deployment target
+            metalCompiler = compiler;
+#else
             if (!FindMetalCompiler(compiler, metalSdk, metalCompiler)) {
                 Printf(RED "ERROR: Can't find Metal compiler for SDK '%s' (is the Metal toolchain installed?)!\n", metalSdk);
                 return false;
             }
+#endif
 
             compilerType = COMPILER_METAL;
         }
@@ -1699,7 +1731,9 @@ static void ExeCompile() {
 
             if (taskData.compilerType == COMPILER_METAL) {
                 // The "metal" driver compiles and links in one step, intermediate ".air" files are managed by the driver
+#ifndef _WIN32
                 cmd << " -sdk " << g_Options.metalSdk << " metal";
+#endif
 
                 // Output
                 cmd << " -o " << EscapePath(outputFile);
@@ -1960,9 +1994,16 @@ static void ExeCompile() {
         if (g_Options.verbose)
             Printf(WHITE "%s\n", cmd.str().c_str());
 
+        // "cmd.exe /c" strips the first and the last quotes, keeping quoted paths (like "Program Files") intact
+#ifdef _WIN32
+        string cmdLine = "\"" + cmd.str() + "\"";
+#else
+        string cmdLine = cmd.str();
+#endif
+
         // Compiling the shader
         ostringstream msg;
-        FILE* pipe = popen(cmd.str().c_str(), "r");
+        FILE* pipe = popen(cmdLine.c_str(), "r");
 
         bool isSucceeded = false;
         bool willRetry = false;

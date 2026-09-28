@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/NVIDIA-RTX/ShaderMake/actions/workflows/build.yml/badge.svg)](https://github.com/NVIDIA-RTX/ShaderMake/actions/workflows/build.yml)
 
-ShaderMake is a front-end tool for batch multi-threaded shader compilation developed by NVIDIA DevTech. It is compatible with Microsoft *FXC* and *DXC* compilers by calling them via API functions or executing them through command line, with [Slang](https://github.com/shader-slang/slang) through command line only, and with the *Metal* compiler from *Xcode* (via `xcrun`) on *macOS*.
+ShaderMake is a front-end tool for batch multi-threaded shader compilation developed by NVIDIA DevTech. It is compatible with Microsoft *FXC* and *DXC* compilers by calling them via API functions or executing them through command line, with [Slang](https://github.com/shader-slang/slang) through command line only, and with the *Metal* compiler from *Xcode* (via `xcrun`) on *macOS* or from *Metal Developer Tools for Windows* on *Windows*.
 
 Features:
 
@@ -38,14 +38,14 @@ ShaderMake.exe -p {DXBC|DXIL|SPIRV|METAL} [-b] [-h] [-B] [-H] -c "path/to/config
 ```
 
 Required inputs and output selection:
-- `-p, --platform` (string) - *DXBC*, *DXIL*, *SPIRV* or *METAL* (*macOS* only)
+- `-p, --platform` (string) - *DXBC*, *DXIL*, *SPIRV* or *METAL* (*macOS* and *Windows* only)
 - `-c, --config` (string) - Configuration file with the list of shaders to compile
 - `-o, --out` (string) - Output directory
 - `-b, --binary` - Output binary files
 - `-h, --header` - Output header files
 - `-B, --binaryBlob` - Output binary blob files
 - `-H, --headerBlob` - Output header blob files
-- `--compiler` (string) - Path to an *FXC/DXC/Slang* compiler. An executable named `slangc` is detected automatically. For *METAL*, path to `xcrun` (optional, default = `/usr/bin/xcrun`) or to *DXC* with `--metalFromDXIL`
+- `--compiler` (string) - Path to an *FXC/DXC/Slang* compiler. An executable named `slangc` is detected automatically. For *METAL*, path to `xcrun` on *macOS* (optional, default = `/usr/bin/xcrun`), to `metal.exe` on *Windows* (optional, see below) or to *DXC* with `--metalFromDXIL`
 
 Compiler settings:
 - `--compilerAlias` (string) - Register `DXC` or `SLANG` as `NAME=path` for selection by config-local `--compilerDXIL` and `--compilerSPIRV`; names are case-insensitive and each alias may be registered once
@@ -93,17 +93,22 @@ Other options:
 - `--noRegShifts` - Don't specify any register shifts for the compiler
 
 *METAL* options:
-- `--metalSdk` (string) - *Xcode* SDK: `macosx`, `iphoneos` or `iphonesimulator` (default = `macosx`)
+- `--metalSdk` (string) - Target SDK: `macosx`, `iphoneos` or `iphonesimulator` (default = `macosx`)
 - `--metalStd` (string) - Metal language standard (default = `metal4.0`)
 - `--metalMinOS` (string) - Minimum OS version for the selected SDK (default = `26.0`, required by `metal4.0`)
 
 - `--metalFromDXIL` - Compile *HLSL* with *DXC* and convert *DXIL* with `metal-shaderconverter` into [Metal converter bundles](#user-content-metal-converter-bundle) (see below)
-- `--metalShaderConverter` (string) - Path to `metal-shaderconverter` (default = found in `PATH` or `/usr/local/bin`)
+- `--metalShaderConverter` (string) - Path to `metal-shaderconverter` (default = found in `PATH` or `/usr/local/bin`, on *Windows* see below)
 - `--metalShaderConverterOptions` (string) - Custom command line options for `metal-shaderconverter`, separated by spaces
 
 *METAL* compiles each shader into a `.metallib` using `xcrun -sdk <sdk> metal`, which may contain any number of functions. Defines, include directories, optimization level (`-O0..3`), `--WX` and custom compiler options are passed to the compiler. `-T` is optional, `-E` and `-m` don't affect compilation, *HLSL*-specific options are ignored. Unresolved `<...>` includes are treated as toolchain headers.
 
 *METAL* with `--metalFromDXIL` compiles *HLSL* exactly as *DXIL* (`--compiler` is *DXC*, config-local `--compilerDXIL` and `--compilerOptionsDXIL` apply) and converts the result with `metal-shaderconverter` using the entry point, the deployment OS and version from `--metalSdk` and `--metalMinOS`, and global and config-local `--metalShaderConverterOptions` (passed as is, in this order, relative paths are relative to the current directory). The converter decides which profiles and options are supported. The metallib and the reflection *JSON* are written as a [Metal converter bundle](#user-content-metal-converter-bundle). Contents of files referenced by `--root-signature`, `--local-root-signature` and `--vertex-input-layout-file` converter options are tracked for re-compilation.
+
+*METAL* on *Windows* uses Apple's *Metal Developer Tools for Windows* and *Metal Shader Converter for Windows* (default installation paths), targeting *macOS*, *iOS* and *iOS Simulator* as on *macOS*:
+- `metal.exe` is taken from `--compiler`, `%PROGRAMFILES%\Metal Developer Tools\bin` or `PATH`. There are no SDKs on *Windows*, `--metalSdk` only selects the deployment target (`-mmacosx-version-min`, `-mios-version-min` or `-mios-simulator-version-min`). The tools version should match the targeted SDKs (e.g. 6.2 for *Xcode 26.2*)
+- `metal-shaderconverter.exe` is taken from `--metalShaderConverter`, `%PROGRAMFILES%\Metal Shader Converter\bin` or `PATH`
+- Per Apple's license, the *Windows* tools must not be used on Apple devices
 
 ShaderMake makes implicit definitions available in config files and shader sources, matching real compiler definitions:
 
