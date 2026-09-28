@@ -55,7 +55,12 @@ else()
     message(WARNING "ShaderMake: Unknown compiler!")
 endif()
 
-if((CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64") OR(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64"))
+# Compilers run on the build host, so pick them by host arch, not target arch.
+if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    set(HOST_IS_ARM64 ON)
+endif()
+
+if(HOST_IS_ARM64)
     set(WINDOWS_ARCH "arm64")
 else()
     set(WINDOWS_ARCH "x64")
@@ -101,7 +106,7 @@ if(SHADERMAKE_FIND_COMPILERS)
             set(SLANG_SUBSTRING "-windows")
         endif()
 
-        if((CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64") OR(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64"))
+        if(HOST_IS_ARM64)
             set(SLANG_SUBSTRING "${SLANG_SUBSTRING}-aarch64")
         else()
             set(SLANG_SUBSTRING "${SLANG_SUBSTRING}-x86_64")
