@@ -266,6 +266,13 @@ static inline uint32_t HashToUint(size_t hash) {
     return uint32_t(hash) ^ (uint32_t(hash >> 32));
 }
 
+static inline void InsertSuffixBeforeExtensions(fs::path& path, const string& suffix) {
+    string filename = path.filename().string();
+    const size_t extensionPos = filename.find('.');
+    filename.insert(extensionPos == string::npos ? filename.size() : extensionPos, suffix);
+    path = path.parent_path() / filename;
+}
+
 static uint64_t HashString(const string& value) {
     uint64_t hash = 14695981039346656037ull;
     for (uint8_t ch : value) {
@@ -1819,17 +1826,13 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
 
     // Compiled shader name
     fs::path shaderName = RemoveLeadingDotDots(configLine.source);
-    if (configLine.outputSuffix) {
-        string filename = shaderName.filename().string();
-        size_t extensionPos = filename.find('.');
-        filename.insert(extensionPos == string::npos ? filename.size() : extensionPos, configLine.outputSuffix);
-        shaderName = shaderName.parent_path() / filename;
-    }
+    if (configLine.outputSuffix)
+        InsertSuffixBeforeExtensions(shaderName, configLine.outputSuffix);
     shaderName.replace_extension("");
     if (g_Options.flatten || configLine.outputDir) // Specifying -o <path> for a shader removes the original path
         shaderName = shaderName.filename();
     if (strcmp(configLine.entryPoint, "main"))
-        shaderName += "_" + string(configLine.entryPoint);
+        InsertSuffixBeforeExtensions(shaderName, "_" + string(configLine.entryPoint));
 
     // Compiled permutation name
     fs::path permutationName = shaderName;
@@ -1839,7 +1842,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
         char buf[16];
         snprintf(buf, sizeof(buf), "_%08X", permutationHash);
 
-        permutationName += buf;
+        InsertSuffixBeforeExtensions(permutationName, buf);
     }
 
     // Output directory

@@ -153,6 +153,18 @@ Config preprocessing uses the default compiler selected by the global `--compile
 
 Every active shader permutation must produce a unique output path. ShaderMake rejects duplicate outputs because compiling them concurrently would be unsafe.
 
+### Output file naming
+
+ShaderMake inserts every generated filename suffix before the first extension that remains after removing the source extension. This applies to the explicit `--outputSuffix`, a non-`main` entry point, and the permutation hash. The platform extension is appended afterward.
+
+For example, compiling `Shader.cs.hlsl` for *DXIL* with `-s _Test -E CSMain` and permutation defines produces names in this form:
+
+```text
+Shader_Test_CSMain_0123ABCD.cs.dxil
+```
+
+Header output adds `.h` after the platform extension, while blob output follows the same suffix placement for its base filename.
+
 ## Shader blob
 
 When the `--binaryBlob` or `--headerBlob` command line arguments are specified, ShaderMake will package multiple permutations for the same shader into a single "blob" file with a custom format. ShaderMake provides a small library with parsing functions to use these blob files. This library can be statically linked with an application by including `ShaderMake` into the project and linking `ShaderMakeBlob` target to your application. Then include `<ShaderMake/ShaderBlob.h>` and use the `ShaderMake::FindPermutationInBlob()` to locate a specific shader permutation in a blob. If that is unsuccessful, `ShaderMake::EnumeratePermutationsInBlob()` and/or `ShaderMake::FormatShaderNotFoundMessage()` functions can help to provide a meaningful error message to the user.
