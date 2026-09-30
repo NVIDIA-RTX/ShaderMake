@@ -207,10 +207,13 @@ bool ParseMetalConverterBundle(const void* bundle, size_t bundleSize, const void
     if (header.magic != MetalConverterBundleMagic || header.version != MetalConverterBundleVersion)
         return false;
 
+    // Layout: header, metallib, reflection (with a zero terminator), non-overlapping and in this order
     const uint8_t* data = static_cast<const uint8_t*>(bundle);
     uint64_t metallibEnd = (uint64_t)header.metallibOffset + header.metallibSize;
     uint64_t reflectionEnd = (uint64_t)header.reflectionOffset + header.reflectionSize;
-    if (header.metallibOffset % 8 != 0 || metallibEnd > bundleSize || reflectionEnd >= bundleSize || data[reflectionEnd] != 0)
+    if (header.metallibOffset < sizeof(header) || header.metallibOffset % 8 != 0 || header.metallibSize == 0 || header.reflectionOffset < metallibEnd)
+        return false;
+    if (metallibEnd > bundleSize || reflectionEnd >= bundleSize || data[reflectionEnd] != 0)
         return false;
 
     *pMetallib = data + header.metallibOffset;

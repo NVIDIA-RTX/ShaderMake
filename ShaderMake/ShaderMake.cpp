@@ -1155,12 +1155,19 @@ static const char* GetMetalDeploymentOS(const char* metalSdk) {
     return nullptr;
 }
 
-// Windows: "%PROGRAMFILES%\<installDir>\bin", then PATH. Others: PATH, then "/usr/local/bin"
-static bool FindMetalTool(const char* name, const char* installDir, fs::path& outPath) {
+// Windows: "%PROGRAMFILES%\<installDir>\bin" (current layout), "%PROGRAMFILES%\<installDir>\<targetDir>\bin" (per-target layout,
+// "macos" or "ios"), then PATH. Others: PATH, then "/usr/local/bin"
+static bool FindMetalTool(const char* name, const char* installDir, const char* targetDir, fs::path& outPath) {
     const char* paths = getenv("PATH");
 #ifdef _WIN32
     const char* programFiles = getenv("PROGRAMFILES");
-    string pathList = programFiles ? string(programFiles) + "\\" + installDir + "\\bin;" : "";
+    string pathList;
+    if (programFiles) {
+        string root = string(programFiles) + "\\" + installDir + "\\";
+        pathList += root + "bin;";
+        if (targetDir)
+            pathList += root + targetDir + "\\bin;";
+    }
     pathList += paths ? paths : "";
 
     const char separator = ';';
@@ -1172,6 +1179,7 @@ static bool FindMetalTool(const char* name, const char* installDir, fs::path& ou
     const char separator = ':';
     string fileName = name;
     UNUSED(installDir);
+    UNUSED(targetDir);
 #endif
 
     size_t begin = 0;
@@ -1358,7 +1366,8 @@ bool Options::Parse(int32_t argc, const char** argv) {
 #elif defined(_WIN32)
         static string metalCompilerPath;
         if (!compiler && !metalFromDxil) {
-            if (!FindMetalTool("metal", "Metal Developer Tools", metalCompiler)) {
+            const char* targetDir = strcmp(metalSdk, "macosx") == 0 ? "macos" : "ios";
+            if (!FindMetalTool("metal", "Metal Developer Tools", targetDir, metalCompiler)) {
                 Printf(RED "ERROR: Can't find 'metal.exe' (install Metal Developer Tools for Windows or use --compiler)!\n");
                 return false;
             }
@@ -1407,7 +1416,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
         if (metalFromDxil) {
             if (metalShaderConverterPath)
                 metalShaderConverter = metalShaderConverterPath;
-            else if (!FindMetalTool("metal-shaderconverter", "Metal Shader Converter", metalShaderConverter)) {
+            else if (!FindMetalTool("metal-shaderconverter", "Metal Shader Converter", nullptr, metalShaderConverter)) {
                 Printf(RED "ERROR: Can't find 'metal-shaderconverter' (use --metalShaderConverter)!\n");
                 return false;
             }
@@ -2085,6 +2094,12 @@ static void ExeCompile() {
 // MAIN
 //=====================================================================================================================
 
+static bool IsMetalToolchainHeader(const fs::path& includeName) {
+    const string name = includeName.generic_string();
+
+    return name.rfind("metal_", 0) == 0 || name.rfind("simd/", 0) == 0;
+}
+
 static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& callStack, fs::file_time_type& outTime) {
     static const basic_regex<char> includePattern("\\s*#include\\s+([\"<])([^>\"]+)[>\"].*");
 
@@ -2133,8 +2148,8 @@ static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& call
             }
         }
 
-        // Metal standard headers are provided by the toolchain
-        if (!isFound && g_Options.platform == METAL && matchResult[1] == "<")
+        // Metal standard headers are provided by the toolchain (only for native MSL, HLSL for "--metalFromDXIL" is tracked like DXIL)
+        if (!isFound && g_Options.platform == METAL && !g_Options.metalFromDxil && matchResult[1] == "<" && IsMetalToolchainHeader(includeName))
             continue;
 
         if (!isFound) {

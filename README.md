@@ -101,12 +101,12 @@ Other options:
 - `--metalShaderConverter` (string) - Path to `metal-shaderconverter` (default = found in `PATH` or `/usr/local/bin`, on *Windows* see below)
 - `--metalShaderConverterOptions` (string) - Custom command line options for `metal-shaderconverter`, separated by spaces
 
-*METAL* compiles each shader into a `.metallib` using `xcrun -sdk <sdk> metal`, which may contain any number of functions. Defines, include directories, optimization level (`-O0..3`), `--WX` and custom compiler options are passed to the compiler. `-T` is optional, `-E` and `-m` don't affect compilation, *HLSL*-specific options are ignored. Unresolved `<...>` includes are treated as toolchain headers.
+*METAL* compiles each shader into a `.metallib` using `xcrun -sdk <sdk> metal`, which may contain any number of functions. Defines, include directories, optimization level (`-O0..3`), `--WX` and custom compiler options are passed to the compiler. `-T` is optional, `-E` and `-m` don't affect compilation, *HLSL*-specific options are ignored. Unresolved `<metal_*>` and `<simd/...>` includes are treated as toolchain headers and are not tracked; other includes must be found through `-I` like on other platforms (or listed with `--relaxedInclude`).
 
 *METAL* with `--metalFromDXIL` compiles *HLSL* exactly as *DXIL* (`--compiler` is *DXC*, config-local `--compilerDXIL` and `--compilerOptionsDXIL` apply) and converts the result with `metal-shaderconverter` using the entry point, the deployment OS and version from `--metalSdk` and `--metalMinOS`, and global and config-local `--metalShaderConverterOptions` (passed as is, in this order, relative paths are relative to the current directory). The converter decides which profiles and options are supported. The metallib and the reflection *JSON* are written as a [Metal converter bundle](#user-content-metal-converter-bundle). Contents of files referenced by `--root-signature`, `--local-root-signature` and `--vertex-input-layout-file` converter options are tracked for re-compilation.
 
 *METAL* on *Windows* uses Apple's *Metal Developer Tools for Windows* and *Metal Shader Converter for Windows* (default installation paths), targeting *macOS*, *iOS* and *iOS Simulator* as on *macOS*:
-- `metal.exe` is taken from `--compiler`, `%PROGRAMFILES%\Metal Developer Tools\bin` or `PATH`. There are no SDKs on *Windows*, `--metalSdk` only selects the deployment target (`-mmacosx-version-min`, `-mios-version-min` or `-mios-simulator-version-min`). The tools version should match the targeted SDKs (e.g. 6.2 for *Xcode 26.2*)
+- `metal.exe` is taken from `--compiler`, `%PROGRAMFILES%\Metal Developer Tools\bin`, the per-target `%PROGRAMFILES%\Metal Developer Tools\macos\bin` (`--metalSdk macosx`) or `...\ios\bin` (`iphoneos`, `iphonesimulator`), or `PATH`. There are no SDKs on *Windows*, `--metalSdk` only selects the deployment target (`-mmacosx-version-min`, `-mios-version-min` or `-mios-simulator-version-min`). The tools version should match the targeted SDKs (e.g. 6.2 for *Xcode 26.2*)
 - `metal-shaderconverter.exe` is taken from `--metalShaderConverter`, `%PROGRAMFILES%\Metal Shader Converter\bin` or `PATH`
 - Per Apple's license, the *Windows* tools must not be used on Apple devices
 
@@ -197,9 +197,9 @@ With `--metalFromDXIL`, ShaderMake writes `metal-shaderconverter` output as a bu
 |--------------------|--------------------------------------------------------------------------------|
 | `magic`            | `SMMB` (`0x424D4D53`)                                                          |
 | `version`          | `1`                                                                            |
-| `metallibOffset`   | 8-byte aligned                                                                 |
+| `metallibOffset`   | 8-byte aligned, after the header                                               |
 | `metallibSize`     |                                                                                |
-| `reflectionOffset` | reflection *JSON* (`--output-reflection-file`), followed by a zero terminator  |
+| `reflectionOffset` | reflection *JSON* (`--output-reflection-file`) after the metallib, followed by a zero terminator |
 | `reflectionSize`   | without the terminator                                                         |
 
 `ShaderMake::MetalConverterBundleHeader` and `ShaderMake::ParseMetalConverterBundle()` from `<ShaderMake/ShaderBlob.h>` (`ShaderMakeBlob` target) describe and validate the bundle.

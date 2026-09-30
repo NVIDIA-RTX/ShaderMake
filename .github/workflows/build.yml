@@ -59,3 +59,39 @@ jobs:
         name: ShaderMake-linux-x64-${{env.GITHUB_SHA_SHORT}}
         path: |
            ${{github.workspace}}/bin/${{env.BUILD_TYPE}}/ShaderMake
+
+  build-macos:
+    runs-on: macos-26
+
+    steps:
+    - name: Setup variables
+      uses: actions/github-script@v7
+      with:
+        script: core.exportVariable('GITHUB_SHA_SHORT', context.sha.substring(0, 7))
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Configure
+      run: cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+
+    - name: Build
+      run: cmake --build ${{github.workspace}}/build -j3
+
+    - name: Metal smoke test
+      run: |
+        xcodebuild -downloadComponent MetalToolchain
+        mkdir -p ${{runner.temp}}/metal && cd ${{runner.temp}}/metal
+        printf '#include <metal_stdlib>\nusing namespace metal;\nkernel void Fill(device uint* b [[buffer(0)]], uint i [[thread_position_in_grid]]) { b[i] = i; }\n' > Test.metal
+        echo 'Test.metal' > Shaders.cfg
+        for sdk in macosx iphoneos iphonesimulator; do
+          ${{github.workspace}}/bin/${{env.BUILD_TYPE}}/ShaderMake -p METAL --metalSdk $sdk --WX --binary -c Shaders.cfg -o out/$sdk
+          test -s out/$sdk/Test.metallib
+        done
+
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: ShaderMake-macos-${{env.GITHUB_SHA_SHORT}}
+        path: |
+           ${{github.workspace}}/bin/${{env.BUILD_TYPE}}/ShaderMake
