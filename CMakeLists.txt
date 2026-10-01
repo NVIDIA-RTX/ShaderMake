@@ -224,6 +224,7 @@ if(SHADERMAKE_TOOL)
         CMAKE_ARGS "${ARGS}"
         BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target ShaderMake --config Release
         BUILD_BYPRODUCTS ${SHADERMAKE_PATH}
+        BUILD_ALWAYS ON # rebuild after source changes (a no-op if nothing changed)
         INSTALL_COMMAND ""
         STEP_TARGETS build
         COMMENT "Building ShaderMake (tool)..."

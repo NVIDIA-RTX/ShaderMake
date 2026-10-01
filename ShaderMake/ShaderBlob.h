@@ -40,11 +40,26 @@ struct ShaderBlobEntry {
 
 typedef bool (*WriteFileCallback)(const void* data, size_t size, void* context);
 
+// Metal converter bundle, the "--metalFromDXIL" output (little-endian): this header, "metal-shaderconverter" metallib (8-byte aligned)
+// and reflection JSON (followed by a zero terminator, not included in "reflectionSize"). Offsets are from the bundle start
+constexpr uint32_t MetalConverterBundleMagic = 0x424D4D53; // "SMMB"
+constexpr uint32_t MetalConverterBundleVersion = 1;
+
+struct MetalConverterBundleHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t metallibOffset;
+    uint32_t metallibSize;
+    uint32_t reflectionOffset;
+    uint32_t reflectionSize;
+};
+
 void EnumeratePermutationsInBlob(const void* blob, size_t blobSize, std::vector<std::string>& permutations);
 bool FindPermutationInBlob(const void* blob, size_t blobSize, const ShaderConstant* constants, uint32_t numConstants, const void** pBinary, size_t* pSize);
 bool WriteFileHeader(WriteFileCallback write, void* context);
 bool WritePermutation(WriteFileCallback write, void* context, const std::string& permutationKey, const void* binary, size_t binarySize);
 std::string FormatShaderNotFoundMessage(const void* blob, size_t blobSize, const ShaderConstant* constants, uint32_t numConstants);
 std::vector<size_t> GetSortedConstantsIndices(const std::vector<std::string>& constants);
+bool ParseMetalConverterBundle(const void* bundle, size_t bundleSize, const void** pMetallib, size_t* pMetallibSize, const char** pReflection, size_t* pReflectionSize);
 
 } // namespace ShaderMake

@@ -80,6 +80,7 @@ enum Platform : uint8_t {
     DXBC,
     DXIL,
     SPIRV,
+    METAL,
 
     PLATFORMS_NUM
 };
@@ -88,6 +89,8 @@ enum CompilerType : uint8_t {
     COMPILER_FXC,
     COMPILER_DXC,
     COMPILER_SLANG,
+    COMPILER_METAL,
+    COMPILER_METAL_SHADER_CONVERTER,
 };
 
 struct CompilerAlias {
@@ -102,9 +105,12 @@ struct Options {
     vector<string> defines;
     vector<string> spirvExtensions = {"SPV_EXT_descriptor_indexing", "KHR"};
     vector<string> compilerOptions;
+    vector<string> metalShaderConverterOptions;
     vector<string> compilerAliasArgs;
     vector<CompilerAlias> compilerAliases;
     fs::path configFile;
+    fs::path metalCompiler;
+    fs::path metalShaderConverter;
     fs::path sourceDir;
     const char* projectName = "";
     const char* platformName = nullptr;
@@ -114,6 +120,9 @@ struct Options {
     const char* compiler = nullptr;
     const char* outputExt = nullptr;
     const char* vulkanMemoryLayout = nullptr;
+    const char* metalSdk = "macosx";
+    const char* metalStd = "metal4.0";
+    const char* metalMinOS = "26.0";
     uint32_t sRegShift = 100;
     uint32_t tRegShift = 200;
     uint32_t bRegShift = 300;
@@ -145,6 +154,7 @@ struct Options {
     bool slangHlsl = false;
     bool noRegShifts = false;
     bool compactProgress = false;
+    bool metalFromDxil = false;
 
     bool Parse(int32_t argc, const char** argv);
 
@@ -158,6 +168,7 @@ struct ConfigLine {
     vector<string> compilerOptions;
     vector<string> compilerOptionsDXIL;
     vector<string> compilerOptionsSPIRV;
+    vector<string> metalShaderConverterOptions;
     const char* source = nullptr;
     const char* entryPoint = "main";
     const char* profile = nullptr;
@@ -178,6 +189,7 @@ struct TaskData {
     vector<string> compilerOptions;
     vector<string> compilerOptionsDXIL;
     vector<string> compilerOptionsSPIRV;
+    vector<string> metalShaderConverterOptions;
     string source;
     string entryPoint;
     string profile;
@@ -217,17 +229,22 @@ atomic<uint32_t> g_FailedTaskCount = 0;
 uint32_t g_OriginalTaskCount;
 const char* g_OutputExt = nullptr;
 
-std::array<const char*, 3> g_PlatformNames = {
+std::array<const char*, PLATFORMS_NUM> g_PlatformNames = {
     "DXBC",
     "DXIL",
     "SPIRV",
+    "METAL",
 };
 
-std::array<const char*, 3> g_PlatformExts = {
+std::array<const char*, PLATFORMS_NUM> g_PlatformExts = {
     ".dxbc",
     ".dxil",
     ".spirv",
+    ".metallib",
 };
+
+// Metal converter bundle ("ShaderBlob.h")
+const char* g_MetalConverterBundleExt = ".metalbundle";
 
 std::array<const char*, 3> g_PlatformSlangTargets = {
     "dxbc",
@@ -361,6 +378,8 @@ static bool HasConfigDefine(const char* name) {
         return g_Options.compilerType == COMPILER_SLANG;
     if (strcmp(name, "__spirv__") == 0)
         return g_Options.platform == SPIRV;
+    if (strcmp(name, "__METAL__") == 0)
+        return g_Options.platform == METAL;
 
     return false;
 }
@@ -477,28 +496,48 @@ static void AppendBuildSignaturePaths(ostringstream& signature, const char* name
         AppendBuildSignatureValue(signature, name, PathToString(path));
 }
 
+static string FileTimeToString(fs::file_time_type time) {
+    // libc++ can use a 128-bit filesystem clock, which has no to_string overload.
+    auto ticks = time.time_since_epoch().count();
+    const bool negative = ticks < 0;
+    string result;
+    do {
+        const int digit = static_cast<int>(ticks % 10);
+        result.push_back(static_cast<char>('0' + (digit < 0 ? -digit : digit)));
+        ticks /= 10;
+    } while (ticks != 0);
+    if (negative)
+        result.push_back('-');
+    reverse(result.begin(), result.end());
+
+    return result;
+}
+
 static void AppendCompilerBuildSignature(ostringstream& signature, const fs::path& compilerPath, CompilerType compilerType) {
     fs::path path = fs::absolute(compilerPath).lexically_normal();
     AppendBuildSignatureValue(signature, "compiler", PathToString(path));
     AppendBuildSignatureValue(signature, "compilerType", to_string(compilerType));
     AppendBuildSignatureValue(signature, "compilerSize", to_string(fs::file_size(path)));
-    AppendBuildSignatureValue(signature, "compilerTime", to_string(fs::last_write_time(path).time_since_epoch().count()));
+    AppendBuildSignatureValue(signature, "compilerTime", FileTimeToString(fs::last_write_time(path)));
 
 #ifdef _WIN32
     static const char* dxcSidecars[] = {"dxcompiler.dll", "dxil.dll"};
     static const char* slangSidecars[] = {
         "gfx.dll", "slang-compiler.dll", "slang-glsl-module.dll", "slang-glslang.dll",
         "slang-llvm.dll", "slang-rt.dll", "slang.dll"};
+    static const char* metalShaderConverterSidecars[] = {"metalirconverter.dll"};
 #elif defined(__APPLE__)
     static const char* dxcSidecars[] = {"libdxcompiler.dylib", "libdxil.dylib"};
     static const char* slangSidecars[] = {
         "libgfx.dylib", "libslang-compiler.dylib", "libslang-glsl-module.dylib", "libslang-glslang.dylib",
         "libslang-llvm.dylib", "libslang-rt.dylib", "libslang.dylib"};
+    static const char* metalShaderConverterSidecars[] = {"libmetalirconverter.dylib"};
 #else
     static const char* dxcSidecars[] = {"libdxcompiler.so", "libdxil.so"};
     static const char* slangSidecars[] = {
         "libgfx.so", "libslang-compiler.so", "libslang-glsl-module.so", "libslang-glslang.so",
         "libslang-llvm.so", "libslang-rt.so", "libslang.so"};
+    static const char* metalShaderConverterSidecars[] = {"libmetalirconverter.so"};
 #endif
 
     const char* const* sidecars = nullptr;
@@ -509,6 +548,9 @@ static void AppendCompilerBuildSignature(ostringstream& signature, const fs::pat
     } else if (compilerType == COMPILER_SLANG) {
         sidecars = slangSidecars;
         sidecarNum = COUNT_OF(slangSidecars);
+    } else if (compilerType == COMPILER_METAL_SHADER_CONVERTER) {
+        sidecars = metalShaderConverterSidecars;
+        sidecarNum = COUNT_OF(metalShaderConverterSidecars);
     }
 
     fs::path sidecarDirs[] = {
@@ -525,7 +567,7 @@ static void AppendCompilerBuildSignature(ostringstream& signature, const fs::pat
 
             AppendBuildSignatureValue(signature, "compilerSidecar", PathToString(sidecarPath));
             AppendBuildSignatureValue(signature, "compilerSidecarSize", to_string(fs::file_size(sidecarPath)));
-            AppendBuildSignatureValue(signature, "compilerSidecarTime", to_string(fs::last_write_time(sidecarPath).time_since_epoch().count()));
+            AppendBuildSignatureValue(signature, "compilerSidecarTime", FileTimeToString(fs::last_write_time(sidecarPath)));
         }
     }
 }
@@ -536,6 +578,71 @@ static string GetCompilerBuildSignature(const fs::path& compilerPath, CompilerTy
     AppendCompilerBuildSignature(signature, compilerPath, compilerType);
 
     return signature.str();
+}
+
+static uint64_t GetFileContentsHash(const fs::path& path) {
+    ifstream stream(path, ios::binary);
+    ostringstream contents;
+    contents << stream.rdbuf();
+
+    return HashString(contents.str());
+}
+
+// Input files of "metal-shaderconverter" options: "--option=<file>" or "--option <file>", with one or two dashes
+static vector<fs::path> GetMetalShaderConverterInputFiles(const vector<string>& metalShaderConverterOptions) {
+    static const char* fileOptions[] = {"root-signature", "local-root-signature", "vertex-input-layout-file"};
+
+    vector<string> tokens;
+    for (const string& options : metalShaderConverterOptions) {
+        string token;
+        bool isToken = false;
+        char quote = 0;
+        for (char ch : options) {
+            if (quote) {
+                if (ch == quote)
+                    quote = 0;
+                else
+                    token += ch;
+            } else if (ch == '"' || ch == '\'') {
+                quote = ch;
+                isToken = true;
+            } else if (IsSpace(ch)) {
+                if (isToken)
+                    tokens.push_back(token);
+
+                token.clear();
+                isToken = false;
+            } else {
+                token += ch;
+                isToken = true;
+            }
+        }
+
+        if (isToken)
+            tokens.push_back(token);
+    }
+
+    vector<fs::path> files;
+    for (size_t i = 0; i < tokens.size(); i++) {
+        const string& token = tokens[i];
+        size_t nameBegin = token.find_first_not_of('-');
+        if (nameBegin == 0 || nameBegin > 2 || nameBegin == string::npos)
+            continue;
+
+        size_t equal = token.find('=');
+        string name = token.substr(nameBegin, equal == string::npos ? string::npos : equal - nameBegin);
+        for (const char* fileOption : fileOptions) {
+            if (name != fileOption)
+                continue;
+
+            if (equal != string::npos)
+                files.push_back(token.substr(equal + 1));
+            else if (i + 1 < tokens.size())
+                files.push_back(tokens[++i]);
+        }
+    }
+
+    return files;
 }
 
 static string GetBuildSignature() {
@@ -576,6 +683,21 @@ static string GetBuildSignature() {
         AppendBuildSignatureValues(signature, "spirvExtension", g_Options.spirvExtensions);
     }
 
+    if (g_Options.platform == METAL) {
+        AppendBuildSignatureValue(signature, "metalSdk", g_Options.metalSdk);
+        AppendBuildSignatureValue(signature, "metalStd", g_Options.metalStd);
+        AppendBuildSignatureValue(signature, "metalMinOS", g_Options.metalMinOS);
+
+        if (g_Options.metalFromDxil) {
+            AppendBuildSignatureValues(signature, "metalShaderConverterOptions", g_Options.metalShaderConverterOptions);
+            for (const fs::path& file : GetMetalShaderConverterInputFiles(g_Options.metalShaderConverterOptions))
+                AppendBuildSignatureValue(signature, "metalShaderConverterInput", PathToString(file) + ":" + to_string(GetFileContentsHash(file)));
+
+            AppendCompilerBuildSignature(signature, g_Options.metalShaderConverter, COMPILER_METAL_SHADER_CONVERTER);
+        } else
+            AppendCompilerBuildSignature(signature, g_Options.metalCompiler, COMPILER_METAL);
+    }
+
     return signature.str();
 }
 
@@ -589,7 +711,7 @@ static string GetBuildSignatureStem() {
     char configHash[17];
     snprintf(configHash, sizeof(configHash), "%016llX", (unsigned long long)HashString(configPath));
 
-    return ".ShaderMake." + string(g_Options.platformName) + "." + configHash;
+    return ".ShaderMake." + string(g_Options.platformName) + (g_Options.metalFromDxil ? "_DXIL." : ".") + configHash;
 }
 
 static fs::path GetBuildSignaturePath() {
@@ -753,10 +875,14 @@ static void Printf(const char* format, ...) {
     fflush(stdout);
 }
 
+static const char* GetPlatformExt() {
+    return g_Options.metalFromDxil ? g_MetalConverterBundleExt : g_PlatformExts[g_Options.platform];
+}
+
 static string GetShaderName(const fs::path& path) {
     string name = path.filename().string();
     replace(name.begin(), name.end(), '.', '_');
-    name += "_" + string(g_PlatformExts[g_Options.platform] + 1);
+    name += "_" + string(GetPlatformExt() + 1);
 
     return "g_" + name;
 }
@@ -987,6 +1113,93 @@ static uint32_t GetVulkanMaxSpirvVersion(const char* vulkanVersion) {
     return 106;
 }
 
+static const char* GetMetalMinOSOption(const char* metalSdk) {
+    if (strcmp(metalSdk, "macosx") == 0)
+        return "-mmacosx-version-min=";
+    if (strcmp(metalSdk, "iphoneos") == 0)
+        return "-mios-version-min=";
+    if (strcmp(metalSdk, "iphonesimulator") == 0)
+        return "-mios-simulator-version-min=";
+
+    return nullptr;
+}
+
+#ifndef _WIN32
+static bool FindMetalCompiler(const char* xcrun, const char* metalSdk, fs::path& outPath) {
+    string cmd = EscapePath(xcrun) + " -sdk " + metalSdk + " -find metal 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe)
+        return false;
+
+    char buf[BUF_SIZE] = {};
+    bool isRead = fgets(buf, sizeof(buf), pipe) != nullptr;
+    if (pclose(pipe) != 0 || !isRead)
+        return false;
+
+    string path = buf;
+    path.erase(find_if(path.rbegin(), path.rend(), [](char ch) { return !IsSpace(ch); }).base(), path.end());
+    outPath = path;
+
+    return !path.empty() && fs::exists(outPath);
+}
+#endif
+
+static const char* GetMetalDeploymentOS(const char* metalSdk) {
+    if (strcmp(metalSdk, "macosx") == 0)
+        return "macOS";
+    if (strcmp(metalSdk, "iphoneos") == 0)
+        return "iOS";
+    if (strcmp(metalSdk, "iphonesimulator") == 0)
+        return "iOSSimulator";
+
+    return nullptr;
+}
+
+// Windows: "%PROGRAMFILES%\<installDir>\bin" (current layout), "%PROGRAMFILES%\<installDir>\<targetDir>\bin" (per-target layout,
+// "macos" or "ios"), then PATH. Others: PATH, then "/usr/local/bin"
+static bool FindMetalTool(const char* name, const char* installDir, const char* targetDir, fs::path& outPath) {
+    const char* paths = getenv("PATH");
+#ifdef _WIN32
+    const char* programFiles = getenv("PROGRAMFILES");
+    string pathList;
+    if (programFiles) {
+        string root = string(programFiles) + "\\" + installDir + "\\";
+        pathList += root + "bin;";
+        if (targetDir)
+            pathList += root + targetDir + "\\bin;";
+    }
+    pathList += paths ? paths : "";
+
+    const char separator = ';';
+    string fileName = string(name) + ".exe";
+#else
+    string pathList = paths ? paths : "";
+    pathList += ":/usr/local/bin";
+
+    const char separator = ':';
+    string fileName = name;
+    UNUSED(installDir);
+    UNUSED(targetDir);
+#endif
+
+    size_t begin = 0;
+    while (begin <= pathList.size()) {
+        size_t end = pathList.find(separator, begin);
+        if (end == string::npos)
+            end = pathList.size();
+
+        fs::path path = fs::path(pathList.substr(begin, end - begin)) / fileName;
+        if (end != begin && fs::exists(path)) {
+            outPath = path;
+            return true;
+        }
+
+        begin = end + 1;
+    }
+
+    return false;
+}
+
 static int32_t AddInclude(struct argparse* self, const struct argparse_option* option) {
     ((Options*)(option->data))->includeDirs.push_back(*(const char**)option->value);
     UNUSED(self);
@@ -1017,6 +1230,12 @@ static int32_t AddCompilerOptions(struct argparse* self, const struct argparse_o
     return 0;
 }
 
+static int32_t AddMetalShaderConverterOptions(struct argparse* self, const struct argparse_option* option) {
+    ((Options*)(option->data))->metalShaderConverterOptions.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
+
 static int32_t AddCompilerAlias(struct argparse* self, const struct argparse_option* option) {
     ((Options*)(option->data))->compilerAliasArgs.push_back(*(const char**)option->value);
     UNUSED(self);
@@ -1027,19 +1246,20 @@ bool Options::Parse(int32_t argc, const char** argv) {
     const char* config = nullptr;
     const char* unused = nullptr; // storage for callbacks
     const char* srcDir = "";
+    const char* metalShaderConverterPath = nullptr;
     bool ignoreConfigDir = false;
 
     struct argparse_option options[] = {
         OPT_HELP(),
         OPT_GROUP("Required options:"),
-        OPT_STRING('p', "platform", &platformName, "DXBC, DXIL or SPIRV", nullptr, 0, 0),
+        OPT_STRING('p', "platform", &platformName, "DXBC, DXIL, SPIRV or METAL", nullptr, 0, 0),
         OPT_STRING('c', "config", &config, "Configuration file with the list of shaders to compile", nullptr, 0, 0),
         OPT_STRING('o', "out", &outputDir, "Output directory", nullptr, 0, 0),
         OPT_BOOLEAN('b', "binary", &binary, "Output binary files", nullptr, 0, 0),
         OPT_BOOLEAN('h', "header", &header, "Output header files", nullptr, 0, 0),
         OPT_BOOLEAN('B', "binaryBlob", &binaryBlob, "Output binary blob files", nullptr, 0, 0),
         OPT_BOOLEAN('H', "headerBlob", &headerBlob, "Output header blob files", nullptr, 0, 0),
-        OPT_STRING(0, "compiler", &compiler, "Path to an FXC/DXC/Slang compiler executable", nullptr, 0, 0),
+        OPT_STRING(0, "compiler", &compiler, "Path to an FXC/DXC/Slang compiler executable (METAL: xcrun on macOS, default = /usr/bin/xcrun, metal.exe on Windows, default = found in Program Files or PATH)", nullptr, 0, 0),
         OPT_GROUP("Compiler settings:"),
         OPT_STRING(0, "compilerAlias", &unused, "Alternate compiler for config-local selection in NAME=path form", AddCompilerAlias, (intptr_t)this, 0),
         OPT_STRING('m', "shaderModel", &shaderModel, "Shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
@@ -1062,7 +1282,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
         OPT_STRING(0, "project", &projectName, "Project name to be seen in informational output", nullptr, 0, 0),
         OPT_STRING(0, "sourceDir", &srcDir, "Source code directory", nullptr, 0, 0),
         OPT_STRING(0, "relaxedInclude", &unused, "Include file(s) not invoking re-compilation", AddRelaxedInclude, (intptr_t)this, 0),
-        OPT_STRING(0, "outputExt", &outputExt, "Extension for output files, default is one of .dxbc, .dxil, .spirv", nullptr, 0, 0),
+        OPT_STRING(0, "outputExt", &outputExt, "Extension for output files, default is one of .dxbc, .dxil, .spirv, .metallib", nullptr, 0, 0),
         OPT_BOOLEAN(0, "serial", &serial, "Disable multi-threading", nullptr, 0, 0),
         OPT_INTEGER('j', "jobs", &jobs, "Maximum number of parallel compilation tasks (default = number of logical processors)", nullptr, 0, 0),
         OPT_BOOLEAN(0, "flatten", &flatten, "Flatten source directory structure in the output directory", nullptr, 0, 0),
@@ -1081,11 +1301,18 @@ bool Options::Parse(int32_t argc, const char** argv) {
         OPT_INTEGER(0, "bRegShift", &bRegShift, "SPIRV: register shift for constant (b#) resources", nullptr, 0, 0),
         OPT_INTEGER(0, "uRegShift", &uRegShift, "SPIRV: register shift for UAV (u#) resources", nullptr, 0, 0),
         OPT_BOOLEAN(0, "noRegShifts", &noRegShifts, "Don't specify any register shifts for the compiler", nullptr, 0, 0),
+        OPT_GROUP("METAL options:"),
+        OPT_STRING(0, "metalSdk", &metalSdk, "Target SDK: macosx, iphoneos or iphonesimulator (default = macosx)", nullptr, 0, 0),
+        OPT_STRING(0, "metalStd", &metalStd, "Metal language standard (default = metal4.0)", nullptr, 0, 0),
+        OPT_STRING(0, "metalMinOS", &metalMinOS, "Minimum OS version for the selected SDK (default = 26.0)", nullptr, 0, 0),
+        OPT_BOOLEAN(0, "metalFromDXIL", &metalFromDxil, "Compile HLSL to DXIL, convert it with 'metal-shaderconverter' and output Metal converter bundles", nullptr, 0, 0),
+        OPT_STRING(0, "metalShaderConverter", &metalShaderConverterPath, "Path to 'metal-shaderconverter' (default = found in PATH or /usr/local/bin, on Windows in Program Files or PATH)", nullptr, 0, 0),
+        OPT_STRING(0, "metalShaderConverterOptions", &unused, "Custom command line options for 'metal-shaderconverter', separated by spaces", AddMetalShaderConverterOptions, (intptr_t)this, 0),
         OPT_END(),
     };
 
     static const char* usages[] = {
-        "ShaderMake.exe -p {DXBC|DXIL|SPIRV} [-b] [-h] [-B] [-H] -c \"path/to/config\"\n"
+        "ShaderMake.exe -p {DXBC|DXIL|SPIRV|METAL} [-b] [-h] [-B] [-H] -c \"path/to/config\"\n"
         "\t-o \"path/to/output\" --compiler \"path/to/compiler\" [--compilerAlias \"NAME=path\"] [other options]\n"
         "\t-D DEF1 -D DEF2=1 ... -I \"path1\" -I \"path2\" ...",
         nullptr};
@@ -1119,6 +1346,41 @@ bool Options::Parse(int32_t argc, const char** argv) {
         return false;
     }
 
+    // Platform
+    uint32_t i = 0;
+    for (; i < PLATFORMS_NUM; i++) {
+        if (!strcmp(platformName, g_PlatformNames[i])) {
+            platform = (Platform)i;
+            break;
+        }
+    }
+    if (i == PLATFORMS_NUM) {
+        Printf(RED "ERROR: Unrecognized platform '%s'!\n", platformName);
+        return false;
+    }
+
+    if (platform == METAL) {
+#ifdef __APPLE__
+        if (!compiler && !metalFromDxil)
+            compiler = "/usr/bin/xcrun";
+#elif defined(_WIN32)
+        static string metalCompilerPath;
+        if (!compiler && !metalFromDxil) {
+            const char* targetDir = strcmp(metalSdk, "macosx") == 0 ? "macos" : "ios";
+            if (!FindMetalTool("metal", "Metal Developer Tools", targetDir, metalCompiler)) {
+                Printf(RED "ERROR: Can't find 'metal.exe' (install Metal Developer Tools for Windows or use --compiler)!\n");
+                return false;
+            }
+
+            metalCompilerPath = PathToString(metalCompiler);
+            compiler = metalCompilerPath.c_str();
+        }
+#else
+        Printf(RED "ERROR: METAL platform is only supported on macOS and Windows!\n");
+        return false;
+#endif
+    }
+
     if (!compiler) {
         Printf(RED "ERROR: Compiler not specified!\n");
         return false;
@@ -1136,22 +1398,55 @@ bool Options::Parse(int32_t argc, const char** argv) {
         return false;
     }
 
-    // Platform
-    uint32_t i = 0;
-    for (; i < PLATFORMS_NUM; i++) {
-        if (!strcmp(platformName, g_PlatformNames[i])) {
-            platform = (Platform)i;
-            break;
-        }
-    }
-    if (i == PLATFORMS_NUM) {
-        Printf(RED "ERROR: Unrecognized platform '%s'!\n", platformName);
-        return false;
-    }
-
     // Keep --slang as an explicit override for wrappers and non-standard executable names.
     slang = slang || IsSlangCompiler(compiler);
     compilerType = slang ? COMPILER_SLANG : (platform == DXBC ? COMPILER_FXC : COMPILER_DXC);
+
+    if (platform == METAL) {
+        if (slang) {
+            Printf(RED "ERROR: Slang is not supported for METAL target!\n");
+            return false;
+        }
+
+        if (!GetMetalMinOSOption(metalSdk)) {
+            Printf(RED "ERROR: Unsupported value '%s' for --metalSdk! Only 'macosx', 'iphoneos' and 'iphonesimulator' are supported.\n", metalSdk);
+            return false;
+        }
+
+        if (metalFromDxil) {
+            if (metalShaderConverterPath)
+                metalShaderConverter = metalShaderConverterPath;
+            else if (!FindMetalTool("metal-shaderconverter", "Metal Shader Converter", nullptr, metalShaderConverter)) {
+                Printf(RED "ERROR: Can't find 'metal-shaderconverter' (use --metalShaderConverter)!\n");
+                return false;
+            }
+
+            if (!fs::exists(metalShaderConverter)) {
+                Printf(RED "ERROR: Metal shader converter '%s' does not exist!\n", PathToString(metalShaderConverter).c_str());
+                return false;
+            }
+        } else {
+#ifdef _WIN32
+            // No SDKs on Windows: "metal.exe" is the driver, "--metalSdk" only selects the deployment target
+            metalCompiler = compiler;
+#else
+            if (!FindMetalCompiler(compiler, metalSdk, metalCompiler)) {
+                Printf(RED "ERROR: Can't find Metal compiler for SDK '%s' (is the Metal toolchain installed?)!\n", metalSdk);
+                return false;
+            }
+#endif
+
+            compilerType = COMPILER_METAL;
+        }
+    } else if (metalFromDxil) {
+        Printf(RED "ERROR: --metalFromDXIL is only supported for METAL target!\n");
+        return false;
+    }
+
+    if (!metalShaderConverterOptions.empty() && !metalFromDxil) {
+        Printf(RED "ERROR: --metalShaderConverterOptions requires --metalFromDXIL!\n");
+        return false;
+    }
 
     for (const string& compilerAliasArg : compilerAliasArgs) {
         size_t separatorPos = compilerAliasArg.find('=');
@@ -1185,7 +1480,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
     if (outputExt)
         g_OutputExt = outputExt;
     else
-        g_OutputExt = g_PlatformExts[platform];
+        g_OutputExt = GetPlatformExt();
 
     if (g_Options.vulkanMemoryLayout && platform != SPIRV) {
         Printf(RED "ERROR: --vulkanMemoryLayout is only supported for SPIRV target!\n");
@@ -1276,6 +1571,12 @@ static int32_t AddCompilerOptionsSPIRV(struct argparse* self, const struct argpa
     return 0;
 }
 
+static int32_t AddLocalMetalShaderConverterOptions(struct argparse* self, const struct argparse_option* option) {
+    ((ConfigLine*)(option->data))->metalShaderConverterOptions.push_back(*(const char**)option->value);
+    UNUSED(self);
+    return 0;
+}
+
 bool ConfigLine::Parse(int32_t argc, const char** argv) {
     source = argv[0];
 
@@ -1295,6 +1596,7 @@ bool ConfigLine::Parse(int32_t argc, const char** argv) {
 
         OPT_STRING(0, "compilerOptionsDXIL", &unused, "Custom command line options for dxil, separated by spaces", AddCompilerOptionsDXIL, (intptr_t)this, 0),
         OPT_STRING(0, "compilerOptionsSPIRV", &unused, "Custom command line options for spirv, separated by spaces", AddCompilerOptionsSPIRV, (intptr_t)this, 0),
+        OPT_STRING(0, "metalShaderConverterOptions", &unused, "Custom command line options for 'metal-shaderconverter', separated by spaces", AddLocalMetalShaderConverterOptions, (intptr_t)this, 0),
         OPT_END(),
     };
 
@@ -1309,6 +1611,10 @@ bool ConfigLine::Parse(int32_t argc, const char** argv) {
 
     if (!shaderModel)
         shaderModel = g_Options.shaderModel;
+
+    // A ".metallib" is a library with any number of functions
+    if (!profile && g_Options.platform == METAL && !g_Options.metalFromDxil)
+        profile = "lib";
 
     // If there are some non-option elements in the config line, they will remain in the argv array.
     if (argv[0]) {
@@ -1369,6 +1675,37 @@ static bool TryReserveRetry() {
     return false;
 }
 
+static bool WriteMetalConverterBundle(const string& metallibFile, const string& reflectionFile, const string& outputFile, ostringstream& msg) {
+    vector<uint8_t> metallib;
+    vector<uint8_t> reflection;
+    if (!ReadBinaryFile(metallibFile.c_str(), metallib) || !ReadBinaryFile(reflectionFile.c_str(), reflection)) {
+        msg << "ERROR: Can't read 'metal-shaderconverter' output!\n";
+        return false;
+    }
+
+    // Layout: header, metallib (8-byte aligned), reflection JSON, zero terminator
+    ShaderMake::MetalConverterBundleHeader header = {};
+    header.magic = ShaderMake::MetalConverterBundleMagic;
+    header.version = ShaderMake::MetalConverterBundleVersion;
+    header.metallibOffset = (uint32_t)((sizeof(header) + 7) & ~size_t(7));
+    header.metallibSize = (uint32_t)metallib.size();
+    header.reflectionOffset = header.metallibOffset + header.metallibSize;
+    header.reflectionSize = (uint32_t)reflection.size();
+
+    vector<uint8_t> bundle(header.reflectionOffset + reflection.size() + 1);
+    memcpy(bundle.data(), &header, sizeof(header));
+    memcpy(bundle.data() + header.metallibOffset, metallib.data(), metallib.size());
+    memcpy(bundle.data() + header.reflectionOffset, reflection.data(), reflection.size());
+
+    DataOutputContext context(outputFile.c_str(), false);
+    if (!context.stream || !context.WriteDataAsBinary(bundle.data(), bundle.size())) {
+        msg << "ERROR: Can't write '" << outputFile << "'!\n";
+        return false;
+    }
+
+    return true;
+}
+
 static void ExeCompile() {
     static const char* optimizationLevelRemap[] = {
         " -Od",
@@ -1391,12 +1728,57 @@ static void ExeCompile() {
 
         string outputFile = taskData.outputFileWithoutExt + g_OutputExt;
 
+        // METAL from DXIL: intermediate files for the bundle, next to the output
+        string compilerOutputFile = g_Options.metalFromDxil ? outputFile + ".dxil" : outputFile;
+        string metallibFile = outputFile + ".metallib";
+        string reflectionFile = outputFile + ".json";
+
         // Building command line
         ostringstream cmd;
         {
             cmd << EscapePath(taskData.compiler);
 
-            if (taskData.compilerType == COMPILER_SLANG) {
+            if (taskData.compilerType == COMPILER_METAL) {
+                // The "metal" driver compiles and links in one step, intermediate ".air" files are managed by the driver
+#ifndef _WIN32
+                cmd << " -sdk " << g_Options.metalSdk << " metal";
+#endif
+
+                // Output
+                cmd << " -o " << EscapePath(outputFile);
+
+                // Language standard and deployment target
+                cmd << " -std=" << g_Options.metalStd;
+                cmd << " " << GetMetalMinOSOption(g_Options.metalSdk) << g_Options.metalMinOS;
+
+                // Defines
+                for (const string& define : taskData.defines)
+                    cmd << " -D" << define;
+
+                for (const string& define : g_Options.defines)
+                    cmd << " -D" << define;
+
+                // Include directories
+                for (const fs::path& dir : g_Options.includeDirs)
+                    cmd << " -I " << EscapePath(dir.string());
+
+                // Optimization level
+                cmd << " -O" << taskData.optimizationLevel;
+
+                // Warnings as errors
+                if (g_Options.warningsAreErrors)
+                    cmd << " -Werror";
+
+                // Debug info with sources, embedded or in a separate ".metallibsym" file next to the output
+                if (g_Options.embedPdb)
+                    cmd << " -gline-tables-only -frecord-sources";
+                else if (g_Options.pdb)
+                    cmd << " -gline-tables-only -frecord-sources=flat";
+
+                // Custom options
+                AppendCompilerOptions(cmd, g_Options.compilerOptions, taskData.compilerType);
+                AppendCompilerOptions(cmd, taskData.compilerOptions, taskData.compilerType);
+            } else if (taskData.compilerType == COMPILER_SLANG) {
                 // Slang defaults to slang language mode unless -lang <other language> sets something else.
                 // For HLSL compatibility mode:
                 //    - use -lang hlsl to set language mode to HLSL
@@ -1498,7 +1880,7 @@ static void ExeCompile() {
                 cmd << " -nologo";
 
                 // Output file
-                cmd << " -Fo " << EscapePath(outputFile);
+                cmd << " -Fo " << EscapePath(compilerOutputFile);
 
                 // Profile
                 string profile = taskData.profile + "_";
@@ -1582,7 +1964,7 @@ static void ExeCompile() {
                 AppendCompilerOptions(cmd, taskData.compilerOptions, taskData.compilerType);
 
                 // Platform-specific custom options
-                if (g_Options.platform == DXIL)
+                if (g_Options.platform == DXIL || g_Options.metalFromDxil)
                     AppendCompilerOptions(cmd, taskData.compilerOptionsDXIL, taskData.compilerType);
                 else if (g_Options.platform == SPIRV)
                     AppendCompilerOptions(cmd, taskData.compilerOptionsSPIRV, taskData.compilerType);
@@ -1591,6 +1973,28 @@ static void ExeCompile() {
             // Source file
             fs::path sourceFile = g_Options.sourceDir / taskData.source;
             cmd << " " << EscapePath(sourceFile.string());
+
+            // METAL from DXIL: conversion, custom options are passed as is
+            if (g_Options.metalFromDxil) {
+                cmd << " 2>&1 && " << EscapePath(PathToString(g_Options.metalShaderConverter));
+                cmd << " " << EscapePath(compilerOutputFile);
+                cmd << " --entry-point=" << taskData.entryPoint;
+                cmd << " --deployment-os=" << GetMetalDeploymentOS(g_Options.metalSdk);
+                cmd << " --minimum-os-build-version=" << g_Options.metalMinOS;
+
+                // The converter expects "major.minor.patch"
+                const char* metalMinOS = g_Options.metalMinOS;
+                for (ptrdiff_t dots = count(metalMinOS, metalMinOS + strlen(metalMinOS), '.'); dots < 2; dots++)
+                    cmd << ".0";
+
+                cmd << " -o " << EscapePath(metallibFile);
+                cmd << " " << EscapePath("--output-reflection-file=" + reflectionFile);
+
+                for (const vector<string>* options : {&g_Options.metalShaderConverterOptions, &taskData.metalShaderConverterOptions}) {
+                    for (const string& option : *options)
+                        cmd << " " << option;
+                }
+            }
         }
 
         cmd << " 2>&1";
@@ -1599,9 +2003,16 @@ static void ExeCompile() {
         if (g_Options.verbose)
             Printf(WHITE "%s\n", cmd.str().c_str());
 
+        // "cmd.exe /c" strips the first and the last quotes, keeping quoted paths (like "Program Files") intact
+#ifdef _WIN32
+        string cmdLine = "\"" + cmd.str() + "\"";
+#else
+        string cmdLine = cmd.str();
+#endif
+
         // Compiling the shader
         ostringstream msg;
-        FILE* pipe = popen(cmd.str().c_str(), "r");
+        FILE* pipe = popen(cmdLine.c_str(), "r");
 
         bool isSucceeded = false;
         bool willRetry = false;
@@ -1632,6 +2043,17 @@ static void ExeCompile() {
                 willRetry = true;
         } else
             willRetry = TryReserveRetry();
+
+        // Bundle converter output
+        if (g_Options.metalFromDxil) {
+            if (isSucceeded && !WriteMetalConverterBundle(metallibFile, reflectionFile, outputFile, msg))
+                isSucceeded = false;
+
+            error_code errorCode;
+            fs::remove(compilerOutputFile, errorCode);
+            fs::remove(metallibFile, errorCode);
+            fs::remove(reflectionFile, errorCode);
+        }
 
         // Convert to headers if needed
         if (isSucceeded && (g_Options.header || (g_Options.headerBlob && taskData.combinedDefines.empty()))) {
@@ -1672,8 +2094,14 @@ static void ExeCompile() {
 // MAIN
 //=====================================================================================================================
 
+static bool IsMetalToolchainHeader(const fs::path& includeName) {
+    const string name = includeName.generic_string();
+
+    return name.rfind("metal_", 0) == 0 || name.rfind("simd/", 0) == 0;
+}
+
 static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& callStack, fs::file_time_type& outTime) {
-    static const basic_regex<char> includePattern("\\s*#include\\s+[\"<]([^>\"]+)[>\"].*");
+    static const basic_regex<char> includePattern("\\s*#include\\s+([\"<])([^>\"]+)[>\"].*");
 
     auto found = g_HierarchicalUpdateTimes.find(file);
     if (found != g_HierarchicalUpdateTimes.end()) {
@@ -1702,7 +2130,7 @@ static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& call
         if (matchResult.empty())
             continue;
 
-        fs::path includeName = string(matchResult[1]);
+        fs::path includeName = string(matchResult[2]);
         if (find(g_Options.relaxedIncludes.begin(), g_Options.relaxedIncludes.end(), includeName) != g_Options.relaxedIncludes.end())
             continue;
 
@@ -1719,6 +2147,10 @@ static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& call
                 }
             }
         }
+
+        // Metal standard headers are provided by the toolchain (only for native MSL, HLSL for "--metalFromDXIL" is tracked like DXIL)
+        if (!isFound && g_Options.platform == METAL && !g_Options.metalFromDxil && matchResult[1] == "<" && IsMetalToolchainHeader(includeName))
+            continue;
 
         if (!isFound) {
             Printf(RED "ERROR: Can't find include file '%s', included in:\n", PathToString(includeName).c_str());
@@ -1763,7 +2195,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
         return true;
 
     const char* compilerAliasName = nullptr;
-    if (g_Options.platform == DXIL)
+    if (g_Options.platform == DXIL || g_Options.metalFromDxil)
         compilerAliasName = configLine.compilerDXIL;
     else if (g_Options.platform == SPIRV)
         compilerAliasName = configLine.compilerSPIRV;
@@ -1779,6 +2211,11 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     }
 
     CompilerType compilerType = compilerAlias ? compilerAlias->type : g_Options.compilerType;
+    if (compilerType == COMPILER_SLANG && g_Options.metalFromDxil) {
+        Printf(RED "%s(%u,0): ERROR: Slang is not supported by --metalFromDXIL!\n", PathToString(g_Options.configFile).c_str(), lineIndex + 1);
+        return false;
+    }
+
     if (compilerType == COMPILER_SLANG && g_Options.platform == SPIRV) {
         if (!GetSlangSpirvCapability(g_Options.vulkanVersion)) {
             Printf(RED
@@ -1867,7 +2304,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     // Create intermediate output directories
     bool force = g_Options.force || compilerAliasBuildSignatureChanged;
     fs::path endPath = outputDir / shaderName.parent_path();
-    if (g_Options.pdb && compilerType != COMPILER_SLANG)
+    if (g_Options.pdb && compilerType != COMPILER_SLANG && compilerType != COMPILER_METAL)
         endPath /= PDB_DIR;
     if (endPath.string() != "" && !fs::exists(endPath)) {
         fs::create_directories(endPath);
@@ -1938,6 +2375,17 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
             return false;
 
         sourceTime = max(sourceTime, configTime);
+
+        // Global converter input files are tracked by the build signature
+        if (g_Options.metalFromDxil) {
+            for (const fs::path& file : GetMetalShaderConverterInputFiles(configLine.metalShaderConverterOptions)) {
+                error_code errorCode;
+                fs::file_time_type fileTime = fs::last_write_time(file, errorCode);
+                if (!errorCode)
+                    sourceTime = max(sourceTime, fileTime);
+            }
+        }
+
         if (outputTime > sourceTime)
             return true;
     }
@@ -1967,6 +2415,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     taskData.compilerOptionsSPIRV = configLine.compilerOptionsSPIRV;
     taskData.optimizationLevel = optimizationLevel;
     taskData.noRegShifts = configLine.noRegShifts;
+    taskData.metalShaderConverterOptions = configLine.metalShaderConverterOptions;
 
     // Gather blobs
     if (g_Options.IsBlob()) {

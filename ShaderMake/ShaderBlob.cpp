@@ -194,4 +194,34 @@ std::vector<size_t> GetSortedConstantsIndices(const std::vector<std::string>& co
     return sortedDefinesIndices;
 }
 
+bool ParseMetalConverterBundle(const void* bundle, size_t bundleSize, const void** pMetallib, size_t* pMetallibSize, const char** pReflection, size_t* pReflectionSize) {
+    if (!bundle || bundleSize < sizeof(MetalConverterBundleHeader))
+        return false;
+
+    if (!pMetallib || !pMetallibSize || !pReflection || !pReflectionSize)
+        return false;
+
+    MetalConverterBundleHeader header;
+    memcpy(&header, bundle, sizeof(header));
+
+    if (header.magic != MetalConverterBundleMagic || header.version != MetalConverterBundleVersion)
+        return false;
+
+    // Layout: header, metallib, reflection (with a zero terminator), non-overlapping and in this order
+    const uint8_t* data = static_cast<const uint8_t*>(bundle);
+    uint64_t metallibEnd = (uint64_t)header.metallibOffset + header.metallibSize;
+    uint64_t reflectionEnd = (uint64_t)header.reflectionOffset + header.reflectionSize;
+    if (header.metallibOffset < sizeof(header) || header.metallibOffset % 8 != 0 || header.metallibSize == 0 || header.reflectionOffset < metallibEnd)
+        return false;
+    if (metallibEnd > bundleSize || reflectionEnd >= bundleSize || data[reflectionEnd] != 0)
+        return false;
+
+    *pMetallib = data + header.metallibOffset;
+    *pMetallibSize = header.metallibSize;
+    *pReflection = reinterpret_cast<const char*>(data + header.reflectionOffset);
+    *pReflectionSize = header.reflectionSize;
+
+    return true;
+}
+
 } // namespace ShaderMake
