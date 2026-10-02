@@ -34,9 +34,10 @@ option(SHADERMAKE_FIND_SLANG "Download Slang from GitHub and populate 'SHADERMAK
 option(SHADERMAKE_FIND_COMPILERS "Master switch" ${IS_SUBMODULE})
 option(SHADERMAKE_TOOL "Use ShaderMake as an external tool and hide the executable from the parent project IDE" OFF)
 
-set(SHADERMAKE_DXC_VERSION "v1.9.2607" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
-set(SHADERMAKE_DXC_DATE "2026_07_29" CACHE STRING "DXC release date") # DXC releases on GitHub have this in download links :(
-set(SHADERMAKE_SLANG_VERSION "2026.17.1" CACHE STRING "Slang to download from 'GitHub/Shader-slang' releases")
+set(SHADERMAKE_DXC_VERSION "v1.9.2609" CACHE STRING "DXC to download from 'GitHub/DirectXShaderCompiler' releases")
+set(SHADERMAKE_DXC_DATE "2026_09_29" CACHE STRING "DXC Windows release archive date")
+set(SHADERMAKE_DXC_LINUX_DATE "2026_09_28" CACHE STRING "DXC Linux release archive date")
+set(SHADERMAKE_SLANG_VERSION "2026.19" CACHE STRING "Slang to download from 'GitHub/Shader-slang' releases")
 
 # Globals?
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
@@ -71,7 +72,7 @@ if(SHADERMAKE_FIND_COMPILERS)
     # DXC (GitHub)
     if(SHADERMAKE_FIND_DXC)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-            set(DXC_SUBSTRING "linux_dxc_${SHADERMAKE_DXC_DATE}.x86_x64.tar.gz")
+            set(DXC_SUBSTRING "linux_dxc_${SHADERMAKE_DXC_LINUX_DATE}.x86_x64.tar.gz")
         else()
             set(DXC_SUBSTRING "dxc_${SHADERMAKE_DXC_DATE}.zip")
         endif()
