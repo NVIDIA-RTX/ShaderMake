@@ -205,15 +205,13 @@ if(SHADERMAKE_TOOL)
         set(SHADERMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/build/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
     endif()
 
-    if (CMAKE_GENERATOR_PLATFORM STREQUAL "")
-        # Generator doesn't support platform specificaiton
-        set(GENERATOR_PLATFORM  "")
-    elseif(CMAKE_GENERATOR MATCHES "Visual Studio" AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "AMD64")
-        # For Visual Studio, map the "AMD64" host processor to "x64" platform
-        set(GENERATOR_PLATFORM "x64")
+    # The tool runs on the build host, so Visual Studio must target the host platform, not the parent's.
+    if(NOT CMAKE_GENERATOR MATCHES "Visual Studio")
+        set(GENERATOR_PLATFORM "")
+    elseif(HOST_IS_ARM64)
+        set(GENERATOR_PLATFORM "ARM64")
     else()
-        # For other host architectures, use the same platform as the generator
-        set(GENERATOR_PLATFORM ${CMAKE_GENERATOR_PLATFORM})
+        set(GENERATOR_PLATFORM "x64")
     endif()
 
     ExternalProject_Add(
