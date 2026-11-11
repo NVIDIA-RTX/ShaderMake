@@ -8,7 +8,7 @@ Features:
 
 - Generates *DXBC*, *DXIL* and *SPIR-V* using *FXC*, *DXC* or *Slang* where supported, and *Metal* libraries from *Metal Shading Language* sources or, via *Metal Shader Converter*, from *HLSL* (as [Metal converter bundles](#user-content-metal-converter-bundle));
 - Output formats: a native binary, a header file, and a binary or header [blob](#user-content-shader-blob) (containing all permutations for a given input shader file);
-- Minimizes the number of re-compilation tasks by tracking file modification times, include trees, compiler executables and recognized runtime libraries, and global code-generation settings.
+- Minimizes the number of re-compilation tasks by tracking file modification times, include trees, compiler executables and recognized runtime libraries, and global code-generation settings. Include trees cover `#include` files and, for Slang sources, the modules brought in with `import` / `__include`.
 
 *CMake* options:
 

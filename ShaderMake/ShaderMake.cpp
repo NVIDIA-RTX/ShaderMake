@@ -2102,6 +2102,10 @@ static bool IsMetalToolchainHeader(const fs::path& includeName) {
 
 static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& callStack, fs::file_time_type& outTime) {
     static const basic_regex<char> includePattern("\\s*#include\\s+([\"<])([^>\"]+)[>\"].*");
+    // Slang module dependencies, tracked like #include so that a change to a module recompiles the entry points that
+    // import it: `import Foo;`, `__exported import Foo;`, `import Foo.Bar;` (Foo/Bar.slang), `import "Foo.slang";`,
+    // and `__include Foo;` / `__include "Foo.slang";` (inclusion of a file into the current module).
+    static const basic_regex<char> slangImportPattern("\\s*(?:__exported\\s+)?(?:import|__include)\\s+(?:\"([^\"]+)\"|([A-Za-z_][\\w.]*))\\s*;.*");
 
     auto found = g_HierarchicalUpdateTimes.find(file);
     if (found != g_HierarchicalUpdateTimes.end()) {
@@ -2124,13 +2128,36 @@ static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& call
     fs::path path = file.parent_path();
     fs::file_time_type hierarchicalUpdateTime = fs::last_write_time(file);
 
+    // Slang sources: "import" statements are dependencies too
+    const string extension = file.extension().string();
+    const bool scanSlangImports = g_Options.slang || extension == ".slang" || extension == ".slangh";
+
     for (string line; getline(stream, line);) {
         match_results<const char*> matchResult;
+        bool isSlangImport = false;
         regex_match(line.c_str(), matchResult, includePattern);
+        if (matchResult.empty() && scanSlangImports) {
+            regex_match(line.c_str(), matchResult, slangImportPattern);
+            isSlangImport = !matchResult.empty();
+        }
         if (matchResult.empty())
             continue;
 
-        fs::path includeName = string(matchResult[2]);
+        fs::path includeName;
+        if (!isSlangImport)
+            includeName = string(matchResult[2]);
+        else if (matchResult[1].matched) {
+            // Quoted form: a file path, ".slang" implied when no extension is given
+            includeName = string(matchResult[1]);
+            if (!includeName.has_extension())
+                includeName += ".slang";
+        } else {
+            // Module name: dots separate directories
+            string moduleName = string(matchResult[2]);
+            replace(moduleName.begin(), moduleName.end(), '.', '/');
+            includeName = moduleName + ".slang";
+        }
+
         if (find(g_Options.relaxedIncludes.begin(), g_Options.relaxedIncludes.end(), includeName) != g_Options.relaxedIncludes.end())
             continue;
 
@@ -2149,8 +2176,17 @@ static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& call
         }
 
         // Metal standard headers are provided by the toolchain (only for native MSL, HLSL for "--metalFromDXIL" is tracked like DXIL)
-        if (!isFound && g_Options.platform == METAL && !g_Options.metalFromDxil && matchResult[1] == "<" && IsMetalToolchainHeader(includeName))
+        if (!isFound && !isSlangImport && g_Options.platform == METAL && !g_Options.metalFromDxil && matchResult[1] == "<" && IsMetalToolchainHeader(includeName))
             continue;
+
+        // A Slang module that is not a file on the include paths is provided by the compiler itself (or fails there
+        // with a proper diagnostic), so it is not a tracked dependency
+        if (!isFound && isSlangImport) {
+            if (g_Options.verbose)
+                Printf(YELLOW "Slang module '%s' imported in '%s' not found on the include paths, not tracked\n", PathToString(includeName).c_str(), PathToString(file).c_str());
+
+            continue;
+        }
 
         if (!isFound) {
             Printf(RED "ERROR: Can't find include file '%s', included in:\n", PathToString(includeName).c_str());
