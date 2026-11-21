@@ -52,14 +52,16 @@ bool FindPermutationInBlob(const void* blob, size_t blobSize, const ShaderConsta
     blob = static_cast<const char*>(blob) + g_BlobSignatureSize;
     blobSize -= g_BlobSignatureSize;
 
-    // Making a vector of constant names to sort them
-    std::vector<std::string> constantNames((size_t)numConstants);
+    // Making a vector of "name=value" strings to sort them. ShaderMake sorts the full
+    // "name=value" define strings when it writes the blob, so the same key must be used
+    // here: sorting by name alone differs when one name is a prefix of another ("A", "A1").
+    std::vector<std::string> constantDefines((size_t)numConstants);
     for (uint32_t n = 0; n < numConstants; n++) {
         const ShaderConstant& constant = constants[n];
-        constantNames[n] = constant.name;
+        constantDefines[n] = std::string(constant.name) + "=" + constant.value;
     }
-    // Sorting constant names
-    std::vector<size_t> sortedConstantsIndices = GetSortedConstantsIndices(constantNames);
+    // Sorting constant defines
+    std::vector<size_t> sortedConstantsIndices = GetSortedConstantsIndices(constantDefines);
 
     std::stringstream ss;
     for (uint32_t n = 0; n < numConstants; n++) {
