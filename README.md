@@ -10,15 +10,18 @@ Features:
 - Output formats: a native binary, a header file, and a binary or header [blob](#user-content-shader-blob) (containing all permutations for a given input shader file);
 - Minimizes the number of re-compilation tasks by tracking file modification times, include trees, compiler executables and recognized runtime libraries, and global code-generation settings. Include trees cover `#include` files and, for Slang sources, the modules brought in with `import` / `__include`.
 
+Building requires CMake 3.30 or newer and a C++17 compiler.
+
 *CMake* options:
 
 - `SHADERMAKE_FIND_FXC` - find *FXC* in installed [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/) and populate `SHADERMAKE_FXC_PATH`
-- `SHADERMAKE_FIND_DXC` -  download [DXC](https://github.com/microsoft/DirectXShaderCompiler) from *GitHub* and populate `SHADERMAKE_DXC_PATH`
-- `SHADERMAKE_FIND_DXC_VK` - find *DXC* in installed [Vulkan SDK](https://www.lunarg.com/vulkan-sdk/) and populate `SHADERMAKE_DXC_VK_PATH` (this is the only way to get *DXC* on *macOS* currently)
+- `SHADERMAKE_FIND_DXC` - download [DXC](https://github.com/microsoft/DirectXShaderCompiler) from *GitHub* for Windows or x86-64 Linux hosts and populate `SHADERMAKE_DXC_PATH`
+- `SHADERMAKE_FIND_DXC_VK` - find *DXC* in the installed [Vulkan SDK](https://www.lunarg.com/vulkan-sdk/) or PATH and populate `SHADERMAKE_DXC_VK_PATH` (used for *DXC* on *macOS*)
 - `SHADERMAKE_FIND_SLANG` - download [Slang](https://github.com/shader-slang/slang) from *GitHub* and populate `SHADERMAKE_SLANG_PATH`
 - `SHADERMAKE_FIND_COMPILERS` - master switch
 - `SHADERMAKE_DXC_VERSION` - *DXC* to download from *GitHub/DirectXShaderCompiler* releases
-- `SHADERMAKE_DXC_DATE` - *DXC* release date (unfortunately present in the download links)
+- `SHADERMAKE_DXC_DATE` - *DXC* Windows release archive date
+- `SHADERMAKE_DXC_LINUX_DATE` - *DXC* Linux release archive date
 - `SHADERMAKE_SLANG_VERSION` - *Slang* to download from *GitHub/Shader-slang/slang* releases
 - `SHADERMAKE_BIN_OUTPUT_PATH` - output directory for the ShaderMake executable
 - `SHADERMAKE_TOOL` - use ShaderMake as an external tool and hide the executable from the parent project IDE; this avoids shader recompilation when switching build configurations
