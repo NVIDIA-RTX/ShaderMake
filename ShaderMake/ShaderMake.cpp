@@ -38,6 +38,7 @@ THE SOFTWARE.
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <list>
 #include <map>
 #include <mutex>
@@ -203,6 +204,7 @@ struct TaskData {
     string outputFileWithoutExt;
     string combinedDefines;
     string blobName;
+    fs::path dependencyFile;
     uint32_t optimizationLevel = 3;
     CompilerType compilerType = COMPILER_DXC;
     bool noRegShifts = false;
@@ -228,6 +230,9 @@ struct BuildSignature {
 
 Options g_Options;
 map<fs::path, fs::file_time_type> g_HierarchicalUpdateTimes;
+map<fs::path, fs::file_time_type> g_DependencyTimes;
+map<pair<fs::path, string>, fs::file_time_type> g_DependencySetTimes;
+fs::path g_DependencyCacheDir;
 map<string, BlobData> g_ShaderBlobs;
 map<string, uint32_t> g_OutputLines;
 map<string, BuildSignature> g_CompilerAliasBuildSignatures;
@@ -662,7 +667,8 @@ static string GetBuildSignature() {
     fs::path outputPath = fs::absolute(g_Options.outputDir).lexically_normal();
     ostringstream signature;
 
-    AppendBuildSignatureValue(signature, "version", "2");
+    AppendBuildSignatureValue(signature, "version", "3");
+    AppendBuildSignatureValue(signature, "workingDirectory", PathToString(fs::current_path()));
     AppendBuildSignatureValue(signature, "config", PathToString(g_Options.configFile));
     AppendBuildSignatureValue(signature, "source", PathToString(g_Options.sourceDir));
     AppendBuildSignatureValue(signature, "output", PathToString(outputPath));
@@ -818,6 +824,170 @@ static inline void UpdateOutputTime(const fs::path& outputFile, bool requested, 
         fs::file_time_type time = fs::last_write_time(outputFile);
         outputTime = (outputTime == fs::file_time_type{}) ? time : min(outputTime, time);
     }
+}
+
+static inline fs::path GetDependencyFile(const string& outputKey) {
+    if (g_DependencyCacheDir.empty())
+        return {};
+
+    char name[24];
+    snprintf(name, sizeof(name), "%016llX.deps", (unsigned long long)HashString(outputKey));
+    return g_DependencyCacheDir / name;
+}
+
+static inline bool GetDependencyUpdateTime(const fs::path& dependencyFile, const fs::path& source, fs::file_time_type& outTime) {
+    ifstream fileStream(dependencyFile, ios::binary);
+    if (!fileStream)
+        return false;
+    ostringstream contents;
+    contents << fileStream.rdbuf();
+    if (fileStream.bad())
+        return false;
+
+    // Permutations often share the same dependency list
+    auto key = make_pair(source, contents.str());
+    auto found = g_DependencySetTimes.find(key);
+    if (found != g_DependencySetTimes.end()) {
+        outTime = max(outTime, found->second);
+        return true;
+    }
+
+    istringstream stream(key.second);
+    string header;
+    size_t count = 0;
+    if (!getline(stream, header) || header != "ShaderMake dependencies 1" || !(stream >> count) || count == 0)
+        return false;
+
+    bool hasSource = false;
+    fs::file_time_type dependencyTime = fs::file_time_type::min();
+    for (size_t i = 0; i < count; i++) {
+        string name;
+        if (!(stream >> quoted(name)) || name.empty() || name.find('\0') != string::npos)
+            return false;
+
+        fs::path path(name);
+        if (!path.is_absolute())
+            return false;
+        hasSource |= path == source;
+
+        auto [it, inserted] = g_DependencyTimes.try_emplace(path);
+        if (inserted) {
+            error_code errorCode;
+            it->second = fs::last_write_time(path, errorCode);
+            if (errorCode)
+                it->second = fs::file_time_type::min();
+        }
+        if (it->second == fs::file_time_type::min())
+            return false;
+        dependencyTime = max(dependencyTime, it->second);
+    }
+
+    stream >> ws;
+    if (!hasSource || !stream.eof())
+        return false;
+    g_DependencySetTimes.emplace(std::move(key), dependencyTime);
+    outTime = max(outTime, dependencyTime);
+    return true;
+}
+
+static inline bool ReadCompilerDependencies(const fs::path& file, vector<fs::path>& dependencies) {
+    ifstream stream(file, ios::binary);
+    if (!stream)
+        return false;
+    ostringstream contents;
+    contents << stream.rdbuf();
+    if (stream.bad())
+        return false;
+    string text = contents.str();
+
+    // Skip the Make rule target, including escaped colons and Windows drive letters
+    size_t pos = 0;
+    for (; pos < text.size(); pos++) {
+        if (text[pos] == '\\' && pos + 1 < text.size())
+            pos++;
+        else if (text[pos] == ':' && pos + 1 < text.size() && IsSpace(text[pos + 1]))
+            break;
+    }
+    if (pos == text.size())
+        return false;
+
+    size_t initialSize = dependencies.size();
+    string path;
+    for (pos++; pos < text.size(); pos++) {
+        char ch = text[pos];
+        if (ch == '\\' && pos + 1 < text.size()) {
+            char next = text[pos + 1];
+            if (next == '\r' || next == '\n') {
+                pos++;
+                if (next == '\r' && pos + 1 < text.size() && text[pos + 1] == '\n')
+                    pos++;
+                continue;
+            }
+            if (IsSpace(next) || next == '\\' || next == '#' || next == ':' || next == '$' || next == '[' || next == ']') {
+                path += next;
+                pos++;
+                continue;
+            }
+        } else if (ch == '$' && pos + 1 < text.size() && text[pos + 1] == '$') {
+            path += '$';
+            pos++;
+            continue;
+        }
+
+        if (IsSpace(ch) || ch == '#') {
+            if (!path.empty()) {
+                dependencies.emplace_back(std::move(path));
+                path.clear();
+            }
+            if (ch == '\r' || ch == '\n' || ch == '#')
+                break;
+        } else
+            path += ch;
+    }
+    if (!path.empty())
+        dependencies.emplace_back(std::move(path));
+    return dependencies.size() > initialSize;
+}
+
+static inline bool ReadIncludeTrace(const string& line, CompilerType compilerType, vector<fs::path>& dependencies) {
+    if (compilerType == COMPILER_DXC) {
+        static const string prefix = "; Opening file [";
+        size_t end = line.rfind("], stack top [");
+        if (line.compare(0, prefix.size(), prefix) == 0 && end != string::npos && end > prefix.size()) {
+            dependencies.emplace_back(line.substr(prefix.size(), end - prefix.size()));
+            return true;
+        }
+        return line == "; \n" || line == "; \r\n";
+    }
+    if (compilerType == COMPILER_FXC) {
+        static const string prefix = "Resolved to [";
+        size_t end = line.find_last_not_of("\r\n");
+        if (line.compare(0, prefix.size(), prefix) == 0 && end != string::npos && line[end] == ']' && end > prefix.size()) {
+            dependencies.emplace_back(line.substr(prefix.size(), end - prefix.size()));
+            return true;
+        }
+        return line.compare(0, 14, "Opening file [") == 0 || line.compare(0, 21, "Current working dir [") == 0;
+    }
+    return false;
+}
+
+static inline bool WriteDependencies(const fs::path& file, vector<fs::path>& dependencies, ostringstream& msg) {
+    for (fs::path& path : dependencies)
+        path = fs::absolute(path).lexically_normal();
+    sort(dependencies.begin(), dependencies.end());
+    dependencies.erase(unique(dependencies.begin(), dependencies.end()), dependencies.end());
+
+    // The invalid build signature makes interrupted writes trigger a rebuild
+    ofstream stream(file, ios::binary | ios::trunc);
+    stream << "ShaderMake dependencies 1\n" << dependencies.size() << '\n';
+    for (const fs::path& path : dependencies)
+        stream << quoted(PathToString(path)) << '\n';
+    stream.close();
+    if (!stream) {
+        msg << "ERROR: Can't save dependencies to '" << file.string() << "'!\n";
+        return false;
+    }
+    return true;
 }
 
 static void TrimConfigLine(string& s) {
@@ -1816,6 +1986,12 @@ static void ExeCompile() {
         }
 
         string outputFile = taskData.outputFileWithoutExt + g_OutputExt;
+        fs::path sourceFile = g_Options.sourceDir / taskData.source;
+        fs::path compilerDependencies = taskData.dependencyFile;
+        compilerDependencies += ".compiler.d";
+        vector<fs::path> dependencies;
+        if (!taskData.dependencyFile.empty())
+            dependencies.push_back(sourceFile);
 
         // METAL from DXIL: intermediate files for the bundle, next to the output
         string compilerOutputFile = g_Options.metalFromDxil ? outputFile + ".dxil" : outputFile;
@@ -1992,8 +2168,16 @@ static void ExeCompile() {
             else if (g_Options.platform == SPIRV)
                 AppendCompilerOptions(cmd, taskData.compilerOptionsSPIRV, taskData.compilerType);
 
+            if (!taskData.dependencyFile.empty()) {
+                if (taskData.compilerType == COMPILER_SLANG)
+                    cmd << " -depfile " << EscapePath(compilerDependencies.string());
+                else if (taskData.compilerType == COMPILER_METAL)
+                    cmd << " -MD -MF " << EscapePath(compilerDependencies.string());
+                else
+                    cmd << " -Vi";
+            }
+
             // Source file
-            fs::path sourceFile = g_Options.sourceDir / taskData.source;
             cmd << " " << EscapePath(sourceFile.string());
 
             // METAL from DXIL: conversion, custom options are passed as is
@@ -2034,19 +2218,38 @@ static void ExeCompile() {
 
         // Compiling the shader
         ostringstream msg;
-        FILE* pipe = popen(cmdLine.c_str(), "r");
+        bool ready = true;
+        if (!taskData.dependencyFile.empty()) {
+            for (const fs::path* file : {&taskData.dependencyFile, &compilerDependencies}) {
+                error_code errorCode;
+                fs::remove(*file, errorCode);
+                if (errorCode) {
+                    msg << "ERROR: Can't invalidate dependencies '" << file->string() << "'!\n";
+                    ready = false;
+                }
+            }
+        }
+        FILE* pipe = ready ? popen(cmdLine.c_str(), "r") : nullptr;
 
         bool isSucceeded = false;
         bool willRetry = false;
         if (pipe) {
             char buf[BUF_SIZE];
+            string line;
+            auto consumeLine = [&]() {
+                bool isTrace = !taskData.dependencyFile.empty() && ReadIncludeTrace(line, taskData.compilerType, dependencies);
+                // Ignore FXC save-success messages
+                if (!isTrace && !(g_Options.platform == DXBC && line.compare(0, 12, "compilation ") == 0))
+                    msg << line;
+                line.clear();
+            };
             while (fgets(buf, sizeof(buf), pipe)) {
-                // Ignore useless unmutable FXC messages: "compilation header/object save succeeded"
-                if (g_Options.platform == DXBC && !strncmp(buf, "compilation ", 12))
-                    continue;
-
-                msg << buf;
+                line += buf;
+                if (!line.empty() && line.back() == '\n')
+                    consumeLine();
             }
+            if (!line.empty())
+                consumeLine();
 
             int32_t result = pclose(pipe);
             // Check status, see https://pubs.opengroup.org/onlinepubs/009696699/functions/pclose.html
@@ -2063,8 +2266,18 @@ static void ExeCompile() {
             // Retry if count > 0 and failed to execute child sub-process or command shell (posix only)
             else if ((childProcessError || commandShellError) && TryReserveRetry())
                 willRetry = true;
-        } else
+        } else if (ready)
             willRetry = TryReserveRetry();
+
+        if (!taskData.dependencyFile.empty()) {
+            if (isSucceeded && (taskData.compilerType == COMPILER_SLANG || taskData.compilerType == COMPILER_METAL)
+                && !ReadCompilerDependencies(compilerDependencies, dependencies)) {
+                msg << "ERROR: Can't read compiler dependencies '" << compilerDependencies.string() << "'!\n";
+                isSucceeded = false;
+            }
+            error_code errorCode;
+            fs::remove(compilerDependencies, errorCode);
+        }
 
         // Bundle converter output
         if (g_Options.metalFromDxil) {
@@ -2106,6 +2319,9 @@ static void ExeCompile() {
             } else
                 isSucceeded = false;
         }
+
+        if (isSucceeded && !taskData.dependencyFile.empty())
+            isSucceeded = WriteDependencies(taskData.dependencyFile, dependencies, msg);
 
         // Update progress
         UpdateProgress(taskData, isSucceeded, willRetry, msg.str().c_str());
@@ -2355,6 +2571,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
             PathToString(g_Options.configFile).c_str(), lineIndex + 1, outputKey.c_str(), outputIt->second);
         return false;
     }
+    fs::path dependencyFile = GetDependencyFile(outputKey);
 
     // Create intermediate output directories
     bool force = g_Options.force || compilerAliasBuildSignatureChanged;
@@ -2382,11 +2599,16 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
 
     bool needsCompile = true;
     if (!force) {
-        list<fs::path> callStack;
-        fs::file_time_type sourceTime;
-        fs::path sourceFile = g_Options.sourceDir / configLine.source;
-        if (!GetHierarchicalUpdateTime(sourceFile, callStack, sourceTime))
-            return false;
+        fs::file_time_type sourceTime = fs::file_time_type::min();
+        fs::path sourceFile = fs::absolute(g_Options.sourceDir / configLine.source).lexically_normal();
+        bool dependenciesKnown = true;
+        if (!g_Options.relaxedIncludes.empty()) {
+            // Preserve ignored include subtrees for --relaxedInclude
+            list<fs::path> callStack;
+            if (!GetHierarchicalUpdateTime(sourceFile, callStack, sourceTime))
+                return false;
+        } else
+            dependenciesKnown = GetDependencyUpdateTime(dependencyFile, sourceFile, sourceTime);
 
         sourceTime = max(sourceTime, configTime);
 
@@ -2400,7 +2622,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
             }
         }
 
-        needsCompile = outputTime <= sourceTime;
+        needsCompile = !dependenciesKnown || outputTime <= sourceTime;
     }
     if (!needsCompile && !g_Options.IsBlob())
         return true;
@@ -2422,6 +2644,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     taskData.outputFileWithoutExt = outputFileWithoutExt;
     taskData.needsCompile = needsCompile;
     taskData.needsBlobAssembly = needsBlobAssembly;
+    taskData.dependencyFile = std::move(dependencyFile);
     taskData.defines = configLine.defines;
     if (taskData.compilerType == COMPILER_SLANG && !HasDefine(g_Options.defines, "__SLANG__"))
         AddImplicitDefine(taskData.defines, "__SLANG__");
@@ -2588,6 +2811,9 @@ int32_t main(int32_t argc, const char** argv) {
     if (!g_Options.Parse(argc, argv))
         return 1;
 
+    if (g_Options.relaxedIncludes.empty())
+        g_DependencyCacheDir = fs::path(g_Options.outputDir) / (GetBuildSignatureStem() + ".deps");
+
     string buildSignature = GetBuildSignature();
     fs::path buildSignaturePath = GetBuildSignaturePath();
     bool buildSignatureChanged = !IsBuildSignatureCurrent(buildSignaturePath, buildSignature);
@@ -2654,6 +2880,15 @@ int32_t main(int32_t argc, const char** argv) {
             return true;
         return !g_ShaderBlobs.at(task.blobName).needsCompile;
     }), g_TaskData.end());
+
+    if (!g_TaskData.empty() && !g_DependencyCacheDir.empty()) {
+        error_code errorCode;
+        fs::create_directories(g_DependencyCacheDir, errorCode);
+        if (errorCode) {
+            Printf(RED "ERROR: Can't create dependency directory '%s'!\n", PathToString(g_DependencyCacheDir).c_str());
+            return 1;
+        }
+    }
 
     bool buildSignatureNeedsWrite = buildSignatureChanged || !g_TaskData.empty();
     if (buildSignatureNeedsWrite && !InvalidateBuildSignature(buildSignaturePath))

@@ -8,7 +8,7 @@ Features:
 
 - Generates *DXBC*, *DXIL* and *SPIR-V* using *FXC*, *DXC* or *Slang* where supported, and *Metal* libraries from *Metal Shading Language* sources or, via *Metal Shader Converter*, from *HLSL* (as [Metal converter bundles](#user-content-metal-converter-bundle));
 - Output formats: a native binary, a header file, and a binary or header [blob](#user-content-shader-blob) (containing all permutations for a given input shader file);
-- Minimizes the number of re-compilation tasks by tracking file modification times, include trees, compiler executables and recognized runtime libraries, and global code-generation settings. Include trees cover `#include` files and, for Slang sources, the modules brought in with `import` / `__include`.
+- Tracks compiler-reported dependencies for each shader permutation, including active includes and Slang imports, along with compiler executables, recognized runtime libraries, and global code-generation settings to avoid unnecessary recompilation.
 
 Building requires CMake 3.30 or newer and a C++17 compiler.
 
@@ -27,6 +27,12 @@ Building requires CMake 3.30 or newer and a C++17 compiler.
 - `SHADERMAKE_TOOL` - use ShaderMake as an external tool and hide the executable from the parent project IDE; this avoids shader recompilation when switching build configurations
 
 If either `SHADERMAKE_DXC_PATH` or `SHADERMAKE_DXC_VK_PATH` is empty during deployment, it is set to the available path because both compilers support *DXIL* and *SPIR-V* generation. After deployment, the `SHADERMAKE_PATH` CMake variable stores the path to the ShaderMake executable.
+
+## Incremental builds
+
+By default, ShaderMake saves each permutation's dependencies during compilation and checks them on later builds. Only files used by that permutation are tracked, so includes inside inactive `#if` branches do not need to exist. Missing or damaged dependency data triggers recompilation.
+
+Use `--force` after adding a header that overrides another header in the include search paths. Changes to tracked files, the config, or compiler settings are detected automatically.
 
 ## Command line options
 
@@ -73,7 +79,7 @@ Other options:
 - `-f, --force` - Treat all source files as modified
 - `--project` (string) - Project name used in informational output
 - `--sourceDir` (string) - Source code directory
-- `--relaxedInclude` (string) - Include file(s) not invoking re-compilation
+- `--relaxedInclude` (string) - Ignore changes to the named include file(s) and their nested includes
 - `--outputExt` (string) - Extension for output files, default is one of `.dxbc`, `.dxil`, `.spirv`, `.metallib` (`.metalbundle` with `--metalFromDXIL`)
 - `--serial` - Disable multi-threading
 - `-j, --jobs` (int) - Maximum number of parallel compilation tasks; `0` uses the number of logical processors (default = `0`)
@@ -104,7 +110,7 @@ Other options:
 - `--metalShaderConverter` (string) - Path to `metal-shaderconverter` (default = found in `PATH` or `/usr/local/bin`, on *Windows* see below)
 - `--metalShaderConverterOptions` (string) - Custom command line options for `metal-shaderconverter`, separated by spaces
 
-*METAL* compiles each shader into a `.metallib` using `xcrun -sdk <sdk> metal`, which may contain any number of functions. Defines, include directories, optimization level (`-O0..3`), `--WX` and custom compiler options are passed to the compiler. `-T` is optional, `-E` and `-m` don't affect compilation, *HLSL*-specific options are ignored. Unresolved `<metal_*>` and `<simd/...>` includes are treated as toolchain headers and are not tracked; other includes must be found through `-I` like on other platforms (or listed with `--relaxedInclude`).
+*METAL* compiles each shader into a `.metallib` using `xcrun -sdk <sdk> metal`, which may contain any number of functions. Defines, include directories, optimization level (`-O0..3`), `--WX` and custom compiler options are passed to the compiler. `-T` is optional, `-E` and `-m` don't affect compilation, *HLSL*-specific options are ignored.
 
 *METAL* with `--metalFromDXIL` compiles *HLSL* exactly as *DXIL* (`--compiler` is *DXC*, config-local `--compilerDXIL` and `--compilerOptionsDXIL` apply) and converts the result with `metal-shaderconverter` using the entry point, the deployment OS and version from `--metalSdk` and `--metalMinOS`, and global and config-local `--metalShaderConverterOptions` (passed as is, in this order, relative paths are relative to the current directory). The converter decides which profiles and options are supported. The metallib and the reflection *JSON* are written as a [Metal converter bundle](#user-content-metal-converter-bundle). Contents of files referenced by `--root-signature`, `--local-root-signature` and `--vertex-input-layout-file` converter options are tracked for re-compilation.
 
