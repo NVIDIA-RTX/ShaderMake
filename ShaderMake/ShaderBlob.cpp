@@ -52,22 +52,19 @@ bool FindPermutationInBlob(const void* blob, size_t blobSize, const ShaderConsta
     blob = static_cast<const char*>(blob) + g_BlobSignatureSize;
     blobSize -= g_BlobSignatureSize;
 
-    // Making a vector of constant names to sort them
-    std::vector<std::string> constantNames((size_t)numConstants);
+    // Match the writer's order of full "name=value" strings.
+    std::vector<std::string> constantDefines((size_t)numConstants);
     for (uint32_t n = 0; n < numConstants; n++) {
         const ShaderConstant& constant = constants[n];
-        constantNames[n] = constant.name;
+        constantDefines[n] = std::string(constant.name) + "=" + constant.value;
     }
-    // Sorting constant names
-    std::vector<size_t> sortedConstantsIndices = GetSortedConstantsIndices(constantNames);
+    std::sort(constantDefines.begin(), constantDefines.end());
 
     std::stringstream ss;
     for (uint32_t n = 0; n < numConstants; n++) {
-        size_t sortedIndex = sortedConstantsIndices[n];
-        const ShaderConstant& constant = constants[sortedIndex];
-        ss << constant.name << "=" << constant.value;
-        if (n + 1 < numConstants)
-            ss << " ";
+        if (n != 0)
+            ss << ' ';
+        ss << constantDefines[n];
     }
     std::string permutation = ss.str();
 
