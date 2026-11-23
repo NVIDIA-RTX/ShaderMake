@@ -6,14 +6,14 @@ include(CMakeDependentOption)
 
 project(ShaderMakeAll LANGUAGES C CXX)
 
-# Is submodule?
-if(${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_SOURCE_DIR})
+# Detect standalone builds
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(IS_SUBMODULE OFF)
 else()
     set(IS_SUBMODULE ON)
 endif()
 
-# Cached
+# Cache output settings
 if(IS_SUBMODULE)
     set(SHADERMAKE_BIN_OUTPUT_PATH "" CACHE STRING "")
 else()
@@ -39,16 +39,13 @@ set(SHADERMAKE_DXC_DATE "2026_09_29" CACHE STRING "DXC Windows release archive d
 set(SHADERMAKE_DXC_LINUX_DATE "2026_09_28" CACHE STRING "DXC Linux release archive date")
 set(SHADERMAKE_SLANG_VERSION "2026.22" CACHE STRING "Slang to download from 'GitHub/Shader-slang' releases")
 
-# Globals?
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Compile options
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    set(COMPILE_OPTIONS -Wextra)
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     set(COMPILE_OPTIONS -Wextra)
 elseif(MSVC)
     set(COMPILE_OPTIONS /W4 /WX)
@@ -56,7 +53,7 @@ else()
     message(WARNING "ShaderMake: Unknown compiler!")
 endif()
 
-# Compilers run on the build host, so pick them by host arch, not target arch.
+# Compilers run on the build host, so pick them by host arch, not target arch
 if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
     set(HOST_IS_ARM64 ON)
 endif()
@@ -141,13 +138,13 @@ if(SHADERMAKE_FIND_COMPILERS)
             find_program(SHADERMAKE_DXC_VK_PATH "dxc")
         endif()
 
-        # Soft-fallback to a valid path
+        # Use the other DXC installation as a fallback
         if(NOT SHADERMAKE_DXC_PATH AND SHADERMAKE_DXC_VK_PATH)
             set(SHADERMAKE_DXC_PATH ${SHADERMAKE_DXC_VK_PATH} CACHE INTERNAL "")
         endif()
     endif()
 
-    # Soft-fallback to a valid path
+    # Use the other DXC installation as a fallback
     if(NOT SHADERMAKE_DXC_VK_PATH AND SHADERMAKE_DXC_PATH)
         set(SHADERMAKE_DXC_VK_PATH ${SHADERMAKE_DXC_PATH} CACHE INTERNAL "")
     endif()
@@ -205,7 +202,7 @@ if(SHADERMAKE_TOOL)
         set(SHADERMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/build/ShaderMake${CMAKE_EXECUTABLE_SUFFIX}" CACHE INTERNAL "")
     endif()
 
-    # The tool runs on the build host, so Visual Studio must target the host platform, not the parent's.
+    # The tool runs on the build host, so Visual Studio must target the host platform, not the parent's
     if(NOT CMAKE_GENERATOR MATCHES "Visual Studio")
         set(GENERATOR_PLATFORM "")
     elseif(HOST_IS_ARM64)
@@ -234,7 +231,6 @@ else()
     set(SHADERMAKE_PATH "ShaderMake" CACHE INTERNAL "")
 endif()
 
-# Done
 message(STATUS "SHADERMAKE_PATH = '${SHADERMAKE_PATH}'")
 message(STATUS "SHADERMAKE_FXC_PATH = '${SHADERMAKE_FXC_PATH}'")
 message(STATUS "SHADERMAKE_DXC_PATH = '${SHADERMAKE_DXC_PATH}'")

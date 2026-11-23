@@ -32,6 +32,7 @@ THE SOFTWARE.
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -48,7 +49,11 @@ THE SOFTWARE.
 #include <utility>
 #include <vector>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+
 #ifdef _WIN32
+#    include <io.h>
 #    include <windows.h>
 #else
 #    include <limits.h>
@@ -497,7 +502,7 @@ static void AppendBuildSignaturePaths(ostringstream& signature, const char* name
 }
 
 static string FileTimeToString(fs::file_time_type time) {
-    // libc++ can use a 128-bit filesystem clock, which has no to_string overload.
+    // libc++ can use a 128-bit filesystem clock, which has no to_string overload
     auto ticks = time.time_since_epoch().count();
     const bool negative = ticks < 0;
     string result;
@@ -701,7 +706,7 @@ static string GetBuildSignature() {
     return signature.str();
 }
 
-// Multiple configs may share an output directory, so each one needs an independent signature.
+// Multiple configs may share an output directory, so each one needs an independent signature
 static string GetBuildSignatureStem() {
     string configPath = PathToString(fs::absolute(g_Options.configFile));
 #ifdef _WIN32
@@ -775,6 +780,38 @@ static string EscapePath(const string& s) {
     return s;
 }
 
+static inline void AppendDefinesAndIncludes(ostringstream& cmd, const vector<string>& defines, const char* definePrefix) {
+    for (const string& define : defines)
+        cmd << definePrefix << define;
+    for (const string& define : g_Options.defines)
+        cmd << definePrefix << define;
+    for (const fs::path& dir : g_Options.includeDirs)
+        cmd << " -I " << EscapePath(dir.string());
+}
+
+static inline void AppendSpirvBindingShifts(ostringstream& cmd, bool noRegShifts) {
+    if (g_Options.noRegShifts || noRegShifts)
+        return;
+
+    for (uint32_t space = 0; space < SPIRV_SPACES_NUM; space++) {
+        cmd << " -fvk-s-shift " << g_Options.sRegShift << " " << space;
+        cmd << " -fvk-t-shift " << g_Options.tRegShift << " " << space;
+        cmd << " -fvk-b-shift " << g_Options.bRegShift << " " << space;
+        cmd << " -fvk-u-shift " << g_Options.uRegShift << " " << space;
+    }
+}
+
+static inline void UpdateOutputTime(const fs::path& outputFile, bool requested, bool& force, fs::file_time_type& outputTime) {
+    if (!requested)
+        return;
+
+    force |= !fs::exists(outputFile);
+    if (!force) {
+        fs::file_time_type time = fs::last_write_time(outputFile);
+        outputTime = (outputTime == fs::file_time_type{}) ? time : min(outputTime, time);
+    }
+}
+
 static void TrimConfigLine(string& s) {
     // Remove leading whitespace
     s.erase(s.begin(), find_if(s.begin(), s.end(), [](char ch) { return !IsSpace(ch); }));
@@ -794,7 +831,7 @@ static void TokenizeConfigLine(char* in, vector<const char*>& tokens) {
     char* out = in;
     char* token = out;
 
-    // Some magic to correctly tokenize spaces in ""
+    // Keep spaces inside quoted arguments
     bool isString = false;
     while (*in) {
         if (*in == '"')
@@ -817,28 +854,22 @@ static void TokenizeConfigLine(char* in, vector<const char*>& tokens) {
         tokens.push_back(token);
 }
 
-static uint32_t GetFileLength(FILE* stream) {
-    /*
-    TODO: can be done more efficiently
-    Win:
-        #include <io.h>
+static inline bool GetFileLength(FILE* stream, uint64_t& size) {
+#ifdef _WIN32
+    struct _stat64 status{};
+    if (_fstat64(_fileno(stream), &status) != 0)
+        return false;
+#else
+    struct stat status{};
+    if (fstat(fileno(stream), &status) != 0)
+        return false;
+#endif
 
-        _filelength( _fileno(f) );
-    Linux:
-        #include <sys/types.h> //?
-        #include <sys/stat.h>
+    if (status.st_size < 0)
+        return false;
 
-        struct stat buf;
-        fstat(fd, &buf);
-        off_t size = buf.st_size;
-    */
-
-    const uint32_t pos = ftell(stream);
-    fseek(stream, 0, SEEK_END);
-    const uint32_t len = ftell(stream);
-    fseek(stream, pos, SEEK_SET);
-
-    return len;
+    size = static_cast<uint64_t>(status.st_size);
+    return true;
 }
 
 static void Printf(const char* format, ...) {
@@ -871,7 +902,7 @@ static void Printf(const char* format, ...) {
     if (g_Options.colorize)
         printf(WHITE);
 
-    // IMPORTANT: needed only if being run in CMake environment
+    // Flush progress for CMake builds
     fflush(stdout);
 }
 
@@ -887,7 +918,7 @@ static string GetShaderName(const fs::path& path) {
     return "g_" + name;
 }
 
-// A class that is used to write a code blob as binary or C-string
+// Writes binary blobs or C arrays
 class DataOutputContext {
 public:
     FILE* stream = nullptr;
@@ -957,7 +988,7 @@ private:
 };
 
 static void UpdateProgress(TaskData& taskData, bool isSucceeded, bool willRetry, const char* message) {
-    // IMPORTANT: do not split into several "Printf" calls because multi-threading access to the console can mess up the order
+    // Keep each progress message in one Printf call to avoid interleaving
     if (isSucceeded) {
         float progress = 100.0f * float(++g_ProcessedTaskCount) / float(g_OriginalTaskCount);
 
@@ -985,7 +1016,7 @@ static void UpdateProgress(TaskData& taskData, bool isSucceeded, bool willRetry,
             }
         }
     } else {
-        // If retrying, requeue the task and try again without counting failure or terminating.
+        // If retrying, requeue the task and try again without counting failure or terminating
         if (willRetry) {
             Printf(YELLOW "( RETRY-QUEUED ) %s %s %s {%s} {%s}\n",
                 g_Options.projectName, g_Options.platformName,
@@ -1050,7 +1081,7 @@ static uint64_t Timer_GetTicks() {
 // OPTIONS
 //=====================================================================================================================
 
-// Shader model in major_minor form for DXC/Slang profiles (e.g. 6_5, 6_10); each part is 1-4 decimal digits.
+// Shader model in major_minor form for DXC/Slang profiles (e.g. 6_5, 6_10); each part is 1-4 decimal digits
 static bool ParseShaderModelVersion(const char* sm, uint32_t& outMajor, uint32_t& outMinor) {
     if (!sm || !sm[0])
         return false;
@@ -1200,44 +1231,10 @@ static bool FindMetalTool(const char* name, const char* installDir, const char* 
     return false;
 }
 
-static int32_t AddInclude(struct argparse* self, const struct argparse_option* option) {
-    ((Options*)(option->data))->includeDirs.push_back(*(const char**)option->value);
-    UNUSED(self);
-    return 0;
-}
-
-static int32_t AddGlobalDefine(struct argparse* self, const struct argparse_option* option) {
-    ((Options*)(option->data))->defines.push_back(*(const char**)option->value);
-    UNUSED(self);
-    return 0;
-}
-
-static int32_t AddRelaxedInclude(struct argparse* self, const struct argparse_option* option) {
-    ((Options*)(option->data))->relaxedIncludes.push_back(*(const char**)option->value);
-    UNUSED(self);
-    return 0;
-}
-
-static int32_t AddSpirvExtension(struct argparse* self, const struct argparse_option* option) {
-    ((Options*)(option->data))->spirvExtensions.push_back(*(const char**)option->value);
-    UNUSED(self);
-    return 0;
-}
-
-static int32_t AddCompilerOptions(struct argparse* self, const struct argparse_option* option) {
-    ((Options*)(option->data))->compilerOptions.push_back(*(const char**)option->value);
-    UNUSED(self);
-    return 0;
-}
-
-static int32_t AddMetalShaderConverterOptions(struct argparse* self, const struct argparse_option* option) {
-    ((Options*)(option->data))->metalShaderConverterOptions.push_back(*(const char**)option->value);
-    UNUSED(self);
-    return 0;
-}
-
-static int32_t AddCompilerAlias(struct argparse* self, const struct argparse_option* option) {
-    ((Options*)(option->data))->compilerAliasArgs.push_back(*(const char**)option->value);
+template <typename T>
+static inline int32_t AddOptionValue(struct argparse* self, const struct argparse_option* option) {
+    auto& values = *reinterpret_cast<vector<T>*>(option->data);
+    values.emplace_back(*static_cast<const char**>(option->value));
     UNUSED(self);
     return 0;
 }
@@ -1261,10 +1258,10 @@ bool Options::Parse(int32_t argc, const char** argv) {
         OPT_BOOLEAN('H', "headerBlob", &headerBlob, "Output header blob files", nullptr, 0, 0),
         OPT_STRING(0, "compiler", &compiler, "Path to an FXC/DXC/Slang compiler executable (METAL: xcrun on macOS, default = /usr/bin/xcrun, metal.exe on Windows, default = found in Program Files or PATH)", nullptr, 0, 0),
         OPT_GROUP("Compiler settings:"),
-        OPT_STRING(0, "compilerAlias", &unused, "Alternate compiler for config-local selection in NAME=path form", AddCompilerAlias, (intptr_t)this, 0),
+        OPT_STRING(0, "compilerAlias", &unused, "Alternate compiler for config-local selection in NAME=path form", AddOptionValue<string>, (intptr_t)&compilerAliasArgs, 0),
         OPT_STRING('m', "shaderModel", &shaderModel, "Shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
         OPT_INTEGER('O', "optimization", &optimizationLevel, "Optimization level 0-3 (default = 3, disabled = 0)", nullptr, 0, 0),
-        OPT_STRING('X', "compilerOptions", &unused, "Custom command line options for the compiler, separated by spaces", AddCompilerOptions, (intptr_t)this, 0),
+        OPT_STRING('X', "compilerOptions", &unused, "Custom command line options for the compiler, separated by spaces", AddOptionValue<string>, (intptr_t)&compilerOptions, 0),
         OPT_BOOLEAN(0, "WX", &warningsAreErrors, "Treat warnings as errors", nullptr, 0, 0),
         OPT_BOOLEAN(0, "allResourcesBound", &allResourcesBound, "Maps to '-all_resources_bound' DXC/FXC option: all resources bound", nullptr, 0, 0),
         OPT_BOOLEAN(0, "PDB", &pdb, "Output PDB files in 'out/PDB/' folder when supported", nullptr, 0, 0),
@@ -1275,13 +1272,13 @@ bool Options::Parse(int32_t argc, const char** argv) {
         OPT_BOOLEAN(0, "slang", &slang, "Compiler is Slang", nullptr, 0, 0),
         OPT_BOOLEAN(0, "slangHLSL", &slangHlsl, "Use HLSL compatibility mode when compiler is Slang", nullptr, 0, 0),
         OPT_GROUP("Defines & include directories:"),
-        OPT_STRING('I', "include", &unused, "Include directory(s)", AddInclude, (intptr_t)this, 0),
-        OPT_STRING('D', "define", &unused, "Macro definition(s) in forms 'M=value' or 'M'", AddGlobalDefine, (intptr_t)this, 0),
+        OPT_STRING('I', "include", &unused, "Include directory(s)", AddOptionValue<fs::path>, (intptr_t)&includeDirs, 0),
+        OPT_STRING('D', "define", &unused, "Macro definition(s) in forms 'M=value' or 'M'", AddOptionValue<string>, (intptr_t)&defines, 0),
         OPT_GROUP("Other options:"),
         OPT_BOOLEAN('f', "force", &force, "Treat all source files as modified", nullptr, 0, 0),
         OPT_STRING(0, "project", &projectName, "Project name to be seen in informational output", nullptr, 0, 0),
         OPT_STRING(0, "sourceDir", &srcDir, "Source code directory", nullptr, 0, 0),
-        OPT_STRING(0, "relaxedInclude", &unused, "Include file(s) not invoking re-compilation", AddRelaxedInclude, (intptr_t)this, 0),
+        OPT_STRING(0, "relaxedInclude", &unused, "Include file(s) not invoking re-compilation", AddOptionValue<fs::path>, (intptr_t)&relaxedIncludes, 0),
         OPT_STRING(0, "outputExt", &outputExt, "Extension for output files, default is one of .dxbc, .dxil, .spirv, .metallib", nullptr, 0, 0),
         OPT_BOOLEAN(0, "serial", &serial, "Disable multi-threading", nullptr, 0, 0),
         OPT_INTEGER('j', "jobs", &jobs, "Maximum number of parallel compilation tasks (default = number of logical processors)", nullptr, 0, 0),
@@ -1295,7 +1292,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
         OPT_GROUP("SPIRV options:"),
         OPT_STRING(0, "vulkanMemoryLayout", &vulkanMemoryLayout, "Vulkan memory layout: dx, gl or scalar", nullptr, 0, 0),
         OPT_STRING(0, "vulkanVersion", &vulkanVersion, "Vulkan environment version (default = 1.3)", nullptr, 0, 0),
-        OPT_STRING(0, "spirvExt", &unused, "Add a permitted SPIR-V extension", AddSpirvExtension, (intptr_t)this, 0),
+        OPT_STRING(0, "spirvExt", &unused, "Add a permitted SPIR-V extension", AddOptionValue<string>, (intptr_t)&spirvExtensions, 0),
         OPT_INTEGER(0, "sRegShift", &sRegShift, "SPIRV: register shift for sampler (s#) resources", nullptr, 0, 0),
         OPT_INTEGER(0, "tRegShift", &tRegShift, "SPIRV: register shift for texture (t#) resources", nullptr, 0, 0),
         OPT_INTEGER(0, "bRegShift", &bRegShift, "SPIRV: register shift for constant (b#) resources", nullptr, 0, 0),
@@ -1307,7 +1304,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
         OPT_STRING(0, "metalMinOS", &metalMinOS, "Minimum OS version for the selected SDK (default = 26.0)", nullptr, 0, 0),
         OPT_BOOLEAN(0, "metalFromDXIL", &metalFromDxil, "Compile HLSL to DXIL, convert it with 'metal-shaderconverter' and output Metal converter bundles", nullptr, 0, 0),
         OPT_STRING(0, "metalShaderConverter", &metalShaderConverterPath, "Path to 'metal-shaderconverter' (default = found in PATH or /usr/local/bin, on Windows in Program Files or PATH)", nullptr, 0, 0),
-        OPT_STRING(0, "metalShaderConverterOptions", &unused, "Custom command line options for 'metal-shaderconverter', separated by spaces", AddMetalShaderConverterOptions, (intptr_t)this, 0),
+        OPT_STRING(0, "metalShaderConverterOptions", &unused, "Custom command line options for 'metal-shaderconverter', separated by spaces", AddOptionValue<string>, (intptr_t)&metalShaderConverterOptions, 0),
         OPT_END(),
     };
 
@@ -1398,7 +1395,7 @@ bool Options::Parse(int32_t argc, const char** argv) {
         return false;
     }
 
-    // Keep --slang as an explicit override for wrappers and non-standard executable names.
+    // Keep --slang as an explicit override for wrappers and non-standard executable names
     slang = slang || IsSlangCompiler(compiler);
     compilerType = slang ? COMPILER_SLANG : (platform == DXBC ? COMPILER_FXC : COMPILER_DXC);
 
@@ -1547,36 +1544,6 @@ bool Options::Parse(int32_t argc, const char** argv) {
     return true;
 }
 
-static int32_t AddLocalDefine(struct argparse* self, const struct argparse_option* option) {
-    ((ConfigLine*)(option->data))->defines.push_back(*(const char**)option->value);
-    UNUSED(self);
-    return 0;
-}
-
-static int32_t AddLocalCompilerOptions(struct argparse* self, const struct argparse_option* option) {
-    ((ConfigLine*)(option->data))->compilerOptions.push_back(*(const char**)option->value);
-    UNUSED(self);
-    return 0;
-}
-
-static int32_t AddCompilerOptionsDXIL(struct argparse* self, const struct argparse_option* option) {
-    ((ConfigLine*)(option->data))->compilerOptionsDXIL.push_back(*(const char**)option->value);
-    UNUSED(self);
-    return 0;
-}
-
-static int32_t AddCompilerOptionsSPIRV(struct argparse* self, const struct argparse_option* option) {
-    ((ConfigLine*)(option->data))->compilerOptionsSPIRV.push_back(*(const char**)option->value);
-    UNUSED(self);
-    return 0;
-}
-
-static int32_t AddLocalMetalShaderConverterOptions(struct argparse* self, const struct argparse_option* option) {
-    ((ConfigLine*)(option->data))->metalShaderConverterOptions.push_back(*(const char**)option->value);
-    UNUSED(self);
-    return 0;
-}
-
 bool ConfigLine::Parse(int32_t argc, const char** argv) {
     source = argv[0];
 
@@ -1584,19 +1551,19 @@ bool ConfigLine::Parse(int32_t argc, const char** argv) {
     struct argparse_option options[] = {
         OPT_STRING('T', "profile", &profile, "Shader profile", nullptr, 0, 0),
         OPT_STRING('E', "entryPoint", &entryPoint, "(Optional) entry point", nullptr, 0, 0),
-        OPT_STRING('D', "define", &unused, "(Optional) define(s) in forms 'M=value' or 'M'", AddLocalDefine, (intptr_t)this, 0),
+        OPT_STRING('D', "define", &unused, "(Optional) define(s) in forms 'M=value' or 'M'", AddOptionValue<string>, (intptr_t)&defines, 0),
         OPT_STRING('o', "output", &outputDir, "(Optional) output subdirectory", nullptr, 0, 0),
         OPT_INTEGER('O', "optimization", &optimizationLevel, "(Optional) optimization level", nullptr, 0, 0),
         OPT_STRING('s', "outputSuffix", &outputSuffix, "(Optional) suffix to insert before the first filename extension", nullptr, 0, 0),
         OPT_STRING('m', "shaderModel", &shaderModel, "(Optional) shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
         OPT_STRING(0, "compilerDXIL", &compilerDXIL, "(Optional) compiler alias used only for DXIL", nullptr, 0, 0),
         OPT_STRING(0, "compilerSPIRV", &compilerSPIRV, "(Optional) compiler alias used only for SPIRV", nullptr, 0, 0),
-        OPT_STRING('X', "compilerOptions", &unused, "Custom command line options for the compiler, separated by spaces", AddLocalCompilerOptions, (intptr_t)this, 0),
+        OPT_STRING('X', "compilerOptions", &unused, "Custom command line options for the compiler, separated by spaces", AddOptionValue<string>, (intptr_t)&compilerOptions, 0),
         OPT_BOOLEAN(0, "noRegShifts", &noRegShifts, "Don't specify any register shifts for this shader", nullptr, 0, 0),
 
-        OPT_STRING(0, "compilerOptionsDXIL", &unused, "Custom command line options for dxil, separated by spaces", AddCompilerOptionsDXIL, (intptr_t)this, 0),
-        OPT_STRING(0, "compilerOptionsSPIRV", &unused, "Custom command line options for spirv, separated by spaces", AddCompilerOptionsSPIRV, (intptr_t)this, 0),
-        OPT_STRING(0, "metalShaderConverterOptions", &unused, "Custom command line options for 'metal-shaderconverter', separated by spaces", AddLocalMetalShaderConverterOptions, (intptr_t)this, 0),
+        OPT_STRING(0, "compilerOptionsDXIL", &unused, "Custom command line options for dxil, separated by spaces", AddOptionValue<string>, (intptr_t)&compilerOptionsDXIL, 0),
+        OPT_STRING(0, "compilerOptionsSPIRV", &unused, "Custom command line options for spirv, separated by spaces", AddOptionValue<string>, (intptr_t)&compilerOptionsSPIRV, 0),
+        OPT_STRING(0, "metalShaderConverterOptions", &unused, "Custom command line options for 'metal-shaderconverter', separated by spaces", AddOptionValue<string>, (intptr_t)&metalShaderConverterOptions, 0),
         OPT_END(),
     };
 
@@ -1616,7 +1583,7 @@ bool ConfigLine::Parse(int32_t argc, const char** argv) {
     if (!profile && g_Options.platform == METAL && !g_Options.metalFromDxil)
         profile = "lib";
 
-    // If there are some non-option elements in the config line, they will remain in the argv array.
+    // If there are some non-option elements in the config line, they will remain in the argv array
     if (argv[0]) {
         Printf(RED "ERROR: Unrecognized element in the config line: '%s'!\n", argv[0]);
         return false;
@@ -1643,7 +1610,20 @@ static bool ReadBinaryFile(const char* file, vector<uint8_t>& outData) {
         return false;
     }
 
-    uint32_t const binarySize = GetFileLength(stream);
+    uint64_t fileSize;
+    if (!GetFileLength(stream, fileSize)) {
+        Printf(RED "ERROR: Can't get size of file '%s'!\n", file);
+        fclose(stream);
+        return false;
+    }
+
+    if (fileSize > UINT32_MAX) {
+        Printf(RED "ERROR: Binary file '%s' exceeds the 32-bit size limit!\n", file);
+        fclose(stream);
+        return false;
+    }
+
+    const uint32_t binarySize = static_cast<uint32_t>(fileSize);
     if (binarySize == 0) {
         Printf(RED "ERROR: Binary file '%s' is empty!\n", file);
         fclose(stream);
@@ -1751,16 +1731,7 @@ static void ExeCompile() {
                 cmd << " -std=" << g_Options.metalStd;
                 cmd << " " << GetMetalMinOSOption(g_Options.metalSdk) << g_Options.metalMinOS;
 
-                // Defines
-                for (const string& define : taskData.defines)
-                    cmd << " -D" << define;
-
-                for (const string& define : g_Options.defines)
-                    cmd << " -D" << define;
-
-                // Include directories
-                for (const fs::path& dir : g_Options.includeDirs)
-                    cmd << " -I " << EscapePath(dir.string());
+                AppendDefinesAndIncludes(cmd, taskData.defines, " -D");
 
                 // Optimization level
                 cmd << " -O" << taskData.optimizationLevel;
@@ -1774,22 +1745,10 @@ static void ExeCompile() {
                     cmd << " -gline-tables-only -frecord-sources";
                 else if (g_Options.pdb)
                     cmd << " -gline-tables-only -frecord-sources=flat";
-
-                // Custom options
-                AppendCompilerOptions(cmd, g_Options.compilerOptions, taskData.compilerType);
-                AppendCompilerOptions(cmd, taskData.compilerOptions, taskData.compilerType);
             } else if (taskData.compilerType == COMPILER_SLANG) {
-                // Slang defaults to slang language mode unless -lang <other language> sets something else.
-                // For HLSL compatibility mode:
-                //    - use -lang hlsl to set language mode to HLSL
-                //    - use -unscoped-enums so Slang doesn't require all enums to be scoped
-                if (g_Options.slangHlsl) {
-                    // Language mode: hlsl
-                    cmd << " -lang hlsl";
-
-                    // Treat enums as unscoped
-                    cmd << " -unscoped-enum";
-                }
+                // Enable HLSL compatibility mode
+                if (g_Options.slangHlsl)
+                    cmd << " -lang hlsl -unscoped-enum";
 
                 // Profile
                 cmd << " -profile " << taskData.profile << "_" << taskData.shaderModel;
@@ -1810,22 +1769,11 @@ static void ExeCompile() {
                 // Output
                 cmd << " -o " << EscapePath(outputFile);
 
-                // Entry point
-                if (taskData.profile != "lib") {
-                    // Don't specify entry if profile is lib_*, Slang will use the entry point currently
+                // Libraries select their own entry points
+                if (taskData.profile != "lib")
                     cmd << " -entry " << taskData.entryPoint;
-                }
 
-                // Defines
-                for (const string& define : taskData.defines)
-                    cmd << " -D" << define;
-
-                for (const string& define : g_Options.defines)
-                    cmd << " -D" << define;
-
-                // Include directories
-                for (const fs::path& dir : g_Options.includeDirs)
-                    cmd << " -I " << EscapePath(dir.string());
+                AppendDefinesAndIncludes(cmd, taskData.defines, " -D");
 
                 // Optimization level
                 cmd << " -O" << taskData.optimizationLevel;
@@ -1857,25 +1805,8 @@ static void ExeCompile() {
                             cmd << " -fvk-use-dx-layout";
                     }
 
-                    if (!g_Options.noRegShifts && !taskData.noRegShifts) {
-                        for (uint32_t space = 0; space < SPIRV_SPACES_NUM; space++) {
-                            cmd << " -fvk-s-shift " << g_Options.sRegShift << " " << space;
-                            cmd << " -fvk-t-shift " << g_Options.tRegShift << " " << space;
-                            cmd << " -fvk-b-shift " << g_Options.bRegShift << " " << space;
-                            cmd << " -fvk-u-shift " << g_Options.uRegShift << " " << space;
-                        }
-                    }
+                    AppendSpirvBindingShifts(cmd, taskData.noRegShifts);
                 }
-
-                // Custom options
-                AppendCompilerOptions(cmd, g_Options.compilerOptions, taskData.compilerType);
-                AppendCompilerOptions(cmd, taskData.compilerOptions, taskData.compilerType);
-
-                // Platform-specific custom options
-                if (g_Options.platform == DXIL)
-                    AppendCompilerOptions(cmd, taskData.compilerOptionsDXIL, taskData.compilerType);
-                else if (g_Options.platform == SPIRV)
-                    AppendCompilerOptions(cmd, taskData.compilerOptionsSPIRV, taskData.compilerType);
             } else {
                 cmd << " -nologo";
 
@@ -1893,16 +1824,7 @@ static void ExeCompile() {
                 // Entry point
                 cmd << " -E " << taskData.entryPoint;
 
-                // Defines
-                for (const string& define : taskData.defines)
-                    cmd << " -D " << define;
-
-                for (const string& define : g_Options.defines)
-                    cmd << " -D " << define;
-
-                // Include directories
-                for (const fs::path& dir : g_Options.includeDirs)
-                    cmd << " -I " << EscapePath(dir.string());
+                AppendDefinesAndIncludes(cmd, taskData.defines, " -D ");
 
                 // Args
                 cmd << optimizationLevelRemap[taskData.optimizationLevel];
@@ -1940,14 +1862,7 @@ static void ExeCompile() {
                     for (const string& ext : g_Options.spirvExtensions)
                         cmd << " -fspv-extension=" << ext;
 
-                    if (!g_Options.noRegShifts && !taskData.noRegShifts) {
-                        for (uint32_t space = 0; space < SPIRV_SPACES_NUM; space++) {
-                            cmd << " -fvk-s-shift " << g_Options.sRegShift << " " << space;
-                            cmd << " -fvk-t-shift " << g_Options.tRegShift << " " << space;
-                            cmd << " -fvk-b-shift " << g_Options.bRegShift << " " << space;
-                            cmd << " -fvk-u-shift " << g_Options.uRegShift << " " << space;
-                        }
-                    }
+                    AppendSpirvBindingShifts(cmd, taskData.noRegShifts);
                 } else // Not supported by SPIRV gen
                 {
                     if (g_Options.stripReflection)
@@ -1958,17 +1873,15 @@ static void ExeCompile() {
                         cmd << " -Fd " << EscapePath(pdbPath.string() + "/"); // only binary code affects hash
                     }
                 }
-
-                // Custom options
-                AppendCompilerOptions(cmd, g_Options.compilerOptions, taskData.compilerType);
-                AppendCompilerOptions(cmd, taskData.compilerOptions, taskData.compilerType);
-
-                // Platform-specific custom options
-                if (g_Options.platform == DXIL || g_Options.metalFromDxil)
-                    AppendCompilerOptions(cmd, taskData.compilerOptionsDXIL, taskData.compilerType);
-                else if (g_Options.platform == SPIRV)
-                    AppendCompilerOptions(cmd, taskData.compilerOptionsSPIRV, taskData.compilerType);
             }
+
+            // Custom options follow compiler defaults
+            AppendCompilerOptions(cmd, g_Options.compilerOptions, taskData.compilerType);
+            AppendCompilerOptions(cmd, taskData.compilerOptions, taskData.compilerType);
+            if (g_Options.platform == DXIL || g_Options.metalFromDxil)
+                AppendCompilerOptions(cmd, taskData.compilerOptionsDXIL, taskData.compilerType);
+            else if (g_Options.platform == SPIRV)
+                AppendCompilerOptions(cmd, taskData.compilerOptionsSPIRV, taskData.compilerType);
 
             // Source file
             fs::path sourceFile = g_Options.sourceDir / taskData.source;
@@ -2067,7 +1980,7 @@ static void ExeCompile() {
                     context.WriteDataAsText(buffer.data(), buffer.size());
                     context.WriteTextEpilog();
 
-                    // Keep binaries needed by blob creation or as final output.
+                    // Keep binaries needed by blob creation or as final output
                     bool isNeededByBlob = g_Options.binaryBlob
                         || (g_Options.headerBlob && !taskData.combinedDefines.empty());
                     if (!g_Options.binary && !isNeededByBlob) {
@@ -2102,9 +2015,7 @@ static bool IsMetalToolchainHeader(const fs::path& includeName) {
 
 static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& callStack, fs::file_time_type& outTime) {
     static const basic_regex<char> includePattern("\\s*#include\\s+([\"<])([^>\"]+)[>\"].*");
-    // Slang module dependencies, tracked like #include so that a change to a module recompiles the entry points that
-    // import it: `import Foo;`, `__exported import Foo;`, `import Foo.Bar;` (Foo/Bar.slang), `import "Foo.slang";`,
-    // and `__include Foo;` / `__include "Foo.slang";` (inclusion of a file into the current module).
+    // Track Slang imports and includes as source dependencies
     static const basic_regex<char> slangImportPattern("\\s*(?:__exported\\s+)?(?:import|__include)\\s+(?:\"([^\"]+)\"|([A-Za-z_][\\w.]*))\\s*;.*");
 
     auto found = g_HierarchicalUpdateTimes.find(file);
@@ -2284,17 +2195,15 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
         compilerAliasBuildSignatureChanged = buildSignature.changed;
     }
 
-    // Getting the sorted index of defines. While doing this, the value of defines are also get included in sorting problem
-    // but it doesn't matter until two defines keys are identical which is not the case.
-    vector<size_t> definesSortedIndices = ShaderMake::GetSortedConstantsIndices(configLine.defines);
+    // Sort full define strings without changing compiler argument order
+    vector<string> sortedDefines = configLine.defines;
+    sort(sortedDefines.begin(), sortedDefines.end());
 
-    // Concatenate define strings, i.e. to get something, like: "A=1 B=0 C"
-    string combinedDefines = "";
-    for (size_t i = 0; i < configLine.defines.size(); i++) {
-        size_t sortedIndex = definesSortedIndices[i];
-        combinedDefines += configLine.defines[sortedIndex];
-        if (i != configLine.defines.size() - 1)
-            combinedDefines += " ";
+    string combinedDefines;
+    for (size_t i = 0; i < sortedDefines.size(); i++) {
+        if (i != 0)
+            combinedDefines += ' ';
+        combinedDefines += sortedDefines[i];
     }
 
     // Compiled shader name
@@ -2323,7 +2232,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     if (configLine.outputDir)
         outputDir /= configLine.outputDir;
 
-    // Reject output collisions before workers can concurrently overwrite the same file.
+    // Reject output collisions before workers can concurrently overwrite the same file
     fs::path compilerOutputFile = outputDir / permutationName;
     compilerOutputFile += g_OutputExt;
     string outputKey = PathToString(fs::absolute(compilerOutputFile));
@@ -2347,61 +2256,19 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
         force = true;
     }
 
-    // Early out if no changes detected
-    fs::file_time_type zero; // constructor sets to 0
-    fs::file_time_type outputTime = zero;
+    // Rebuild if an output is missing or older than an input
+    fs::file_time_type outputTime{};
+    fs::path outputFile = outputDir / permutationName;
+    outputFile += g_OutputExt;
+    UpdateOutputTime(outputFile, g_Options.binary, force, outputTime);
+    outputFile += ".h";
+    UpdateOutputTime(outputFile, g_Options.header, force, outputTime);
 
-    {
-        fs::path outputFile = outputDir / permutationName;
-
-        outputFile += g_OutputExt;
-        if (g_Options.binary) {
-            force |= !fs::exists(outputFile);
-            if (!force) {
-                if (outputTime == zero)
-                    outputTime = fs::last_write_time(outputFile);
-                else
-                    outputTime = min(outputTime, fs::last_write_time(outputFile));
-            }
-        }
-
-        outputFile += ".h";
-        if (g_Options.header) {
-            force |= !fs::exists(outputFile);
-            if (!force) {
-                if (outputTime == zero)
-                    outputTime = fs::last_write_time(outputFile);
-                else
-                    outputTime = min(outputTime, fs::last_write_time(outputFile));
-            }
-        }
-    }
-
-    {
-        fs::path outputFile = outputDir / shaderName;
-
-        outputFile += g_OutputExt;
-        if (g_Options.binaryBlob) {
-            force |= !fs::exists(outputFile);
-            if (!force) {
-                if (outputTime == zero)
-                    outputTime = fs::last_write_time(outputFile);
-                else
-                    outputTime = min(outputTime, fs::last_write_time(outputFile));
-            }
-        }
-
-        outputFile += ".h";
-        if (g_Options.headerBlob) {
-            force |= !fs::exists(outputFile);
-            if (!force) {
-                if (outputTime == zero)
-                    outputTime = fs::last_write_time(outputFile);
-                else
-                    outputTime = min(outputTime, fs::last_write_time(outputFile));
-            }
-        }
-    }
+    outputFile = outputDir / shaderName;
+    outputFile += g_OutputExt;
+    UpdateOutputTime(outputFile, g_Options.binaryBlob, force, outputTime);
+    outputFile += ".h";
+    UpdateOutputTime(outputFile, g_Options.headerBlob, force, outputTime);
 
     if (!force) {
         list<fs::path> callStack;
@@ -2667,7 +2534,7 @@ int32_t main(int32_t argc, const char** argv) {
         g_ProcessedTaskCount = 0;
         g_FailedTaskCount = 0;
 
-        // Global retry budget for transient compilation subprocess launch failures.
+        // Global retry budget for transient compilation subprocess launch failures
         g_TaskRetryCount = g_Options.retryCount;
 
         uint32_t availableThreadNum = g_Options.jobs > 0 ? (uint32_t)g_Options.jobs : max(thread::hardware_concurrency(), 1u);
@@ -2681,20 +2548,17 @@ int32_t main(int32_t argc, const char** argv) {
         for (thread& worker : threads)
             worker.join();
 
-        // If a fatal error or a termination request happened, don't proceed to the blob building.
+        // If a fatal error or a termination request happened, don't proceed to the blob building
         if (g_Terminate)
             return 1;
 
         // Dump shader blobs
         for (const auto& [blobName, blobEntries] : g_ShaderBlobs) {
-            // If a blob contains one entry with no defines, just skip it.
-            // The individual file's output name is the same as the blob, and we're done here.
+            // A single no-define entry already has the final blob filename
             if (blobEntries.size() == 1 && blobEntries[0].combinedDefines.empty())
                 continue;
 
-            // Validate that the blob doesn't contain any shaders with empty defines.
-            // In such case, that individual shader's output file is the same as the blob output file, which wouldn't work.
-            // We could detect this condition earlier and work around it by renaming the shader output file, if necessary.
+            // Mixing no-define entries with permutations would overwrite blob output
             bool invalidEntry = false;
             for (const auto& entry : blobEntries) {
                 if (entry.combinedDefines.empty()) {

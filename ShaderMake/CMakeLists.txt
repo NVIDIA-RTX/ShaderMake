@@ -2,7 +2,6 @@ cmake_minimum_required(VERSION 3.15)
 
 project(ShaderMake LANGUAGES C CXX)
 
-# Globals?
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -10,9 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 99)
 
 # Compile options
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    set(COMPILE_OPTIONS -Wextra)
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     set(COMPILE_OPTIONS -Wextra)
 elseif(MSVC)
     set(COMPILE_OPTIONS /W4 /WX)

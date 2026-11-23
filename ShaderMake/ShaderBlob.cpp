@@ -22,15 +22,30 @@
 
 #include "ShaderBlob.h"
 
-#include <algorithm> // std::sort, std::stable_sort
+#include <algorithm>
 #include <cstring>
-#include <numeric> // std::iota
+#include <numeric>
 #include <sstream>
 
 namespace ShaderMake {
 
-static const char* g_BlobSignature = "NVSP";
-static size_t g_BlobSignatureSize = 4;
+static constexpr char g_BlobSignature[] = "NVSP";
+static constexpr size_t g_BlobSignatureSize = sizeof(g_BlobSignature) - 1;
+
+static inline bool ReadBlobEntry(const void*& blob, size_t& blobSize, ShaderBlobEntry& header, const char*& permutation) {
+    if (blobSize <= sizeof(header))
+        return false;
+
+    memcpy(&header, blob, sizeof(header));
+    size_t entrySize = sizeof(header) + header.dataSize + header.permutationSize;
+    if (header.dataSize == 0 || blobSize < entrySize)
+        return false;
+
+    permutation = static_cast<const char*>(blob) + sizeof(header);
+    blob = static_cast<const char*>(blob) + entrySize;
+    blobSize -= entrySize;
+    return true;
+}
 
 bool FindPermutationInBlob(const void* blob, size_t blobSize, const ShaderConstant* constants, uint32_t numConstants, const void** pBinary, size_t* pSize) {
     if (!blob || blobSize < g_BlobSignatureSize)
@@ -40,19 +55,19 @@ bool FindPermutationInBlob(const void* blob, size_t blobSize, const ShaderConsta
         return false;
 
     if (memcmp(blob, g_BlobSignature, g_BlobSignatureSize) != 0) {
-        if (numConstants == 0) {
-            *pBinary = blob;
-            *pSize = blobSize;
+        if (numConstants != 0)
+            return false;
 
-            return true; // this blob is not a permutation blob, and no permutation is requested
-        } else
-            return false; // this blob is not a permutation blob, but the caller requested a permutation
+        // A raw shader binary is the default permutation
+        *pBinary = blob;
+        *pSize = blobSize;
+        return true;
     }
 
     blob = static_cast<const char*>(blob) + g_BlobSignatureSize;
     blobSize -= g_BlobSignatureSize;
 
-    // Match the writer's order of full "name=value" strings.
+    // Match the writer's order of full "name=value" strings
     std::vector<std::string> constantDefines((size_t)numConstants);
     for (uint32_t n = 0; n < numConstants; n++) {
         const ShaderConstant& constant = constants[n];
@@ -60,40 +75,25 @@ bool FindPermutationInBlob(const void* blob, size_t blobSize, const ShaderConsta
     }
     std::sort(constantDefines.begin(), constantDefines.end());
 
-    std::stringstream ss;
+    std::string permutation;
     for (uint32_t n = 0; n < numConstants; n++) {
         if (n != 0)
-            ss << ' ';
-        ss << constantDefines[n];
+            permutation += ' ';
+        permutation += constantDefines[n];
     }
-    std::string permutation = ss.str();
 
-    while (blobSize > sizeof(ShaderBlobEntry)) {
-        const ShaderBlobEntry* header = static_cast<const ShaderBlobEntry*>(blob);
-
-        if (header->dataSize == 0)
-            return false; // last header in the blob is empty
-
-        if (blobSize < sizeof(ShaderBlobEntry) + header->dataSize + header->permutationSize)
-            return false; // insufficient bytes in the blob, cannot continue
-
-        const char* entryPermutation = static_cast<const char*>(blob) + sizeof(ShaderBlobEntry);
-
-        if ((header->permutationSize == permutation.size()) && ((permutation.size() == 0) || (strncmp(entryPermutation, permutation.data(), permutation.size()) == 0))) {
-            const char* binary = static_cast<const char*>(blob) + sizeof(ShaderBlobEntry) + header->permutationSize;
-
-            *pBinary = binary;
-            *pSize = header->dataSize;
+    ShaderBlobEntry header;
+    const char* entryPermutation;
+    while (ReadBlobEntry(blob, blobSize, header, entryPermutation)) {
+        if ((header.permutationSize == permutation.size()) && ((permutation.size() == 0) || (strncmp(entryPermutation, permutation.data(), permutation.size()) == 0))) {
+            *pBinary = entryPermutation + header.permutationSize;
+            *pSize = header.dataSize;
 
             return true;
         }
-
-        size_t offset = sizeof(ShaderBlobEntry) + header->dataSize + header->permutationSize;
-        blob = static_cast<const char*>(blob) + offset;
-        blobSize -= offset;
     }
 
-    return false; // went through the blob, permutation not found
+    return false;
 }
 
 void EnumeratePermutationsInBlob(const void* blob, size_t blobSize, std::vector<std::string>& permutations) {
@@ -106,28 +106,13 @@ void EnumeratePermutationsInBlob(const void* blob, size_t blobSize, std::vector<
     blob = static_cast<const char*>(blob) + g_BlobSignatureSize;
     blobSize -= g_BlobSignatureSize;
 
-    while (blobSize > sizeof(ShaderBlobEntry)) {
-        const ShaderBlobEntry* header = static_cast<const ShaderBlobEntry*>(blob);
-
-        if (header->dataSize == 0)
-            return;
-
-        if (blobSize < sizeof(ShaderBlobEntry) + header->dataSize + header->permutationSize)
-            return;
-
-        if (header->permutationSize > 0) {
-            std::string permutation;
-            permutation.resize(header->permutationSize);
-
-            memcpy(&permutation[0], static_cast<const char*>(blob) + sizeof(ShaderBlobEntry), header->permutationSize);
-
-            permutations.push_back(permutation);
-        } else
-            permutations.push_back("<default>");
-
-        size_t offset = sizeof(ShaderBlobEntry) + header->dataSize + header->permutationSize;
-        blob = static_cast<const char*>(blob) + offset;
-        blobSize -= offset;
+    ShaderBlobEntry header;
+    const char* permutation;
+    while (ReadBlobEntry(blob, blobSize, header, permutation)) {
+        if (header.permutationSize > 0)
+            permutations.emplace_back(permutation, header.permutationSize);
+        else
+            permutations.emplace_back("<default>");
     }
 }
 
@@ -168,23 +153,17 @@ bool WritePermutation(WriteFileCallback write, void* context, const std::string&
     binaryEntry.permutationSize = (uint32_t)permutationKey.size();
     binaryEntry.dataSize = (uint32_t)binarySize;
 
-    bool success;
-    success = write(&binaryEntry, sizeof(binaryEntry), context);
+    bool success = write(&binaryEntry, sizeof(binaryEntry), context);
     success &= write(permutationKey.data(), binaryEntry.permutationSize, context);
     success &= write(binary, binarySize, context);
     return success;
 }
 
 std::vector<size_t> GetSortedConstantsIndices(const std::vector<std::string>& constants) {
-    // Sorting defines indices to have defines sorted order. Example -> ["B", "A", "C"] -> [1, 0, 2]
-    // initialize original index locations
     std::vector<size_t> sortedDefinesIndices(constants.size());
-    iota(sortedDefinesIndices.begin(), sortedDefinesIndices.end(), 0);
+    std::iota(sortedDefinesIndices.begin(), sortedDefinesIndices.end(), 0);
 
-    // sort indexes based on comparing defines in constants
-    // using std::stable_sort instead of std::sort
-    // to avoid unnecessary index re-orderings
-    // when constants contains elements of equal values
+    // Preserve input order for equal constants
     std::stable_sort(sortedDefinesIndices.begin(), sortedDefinesIndices.end(),
         [&constants](size_t i1, size_t i2) { return constants[i1] < constants[i2]; });
 
