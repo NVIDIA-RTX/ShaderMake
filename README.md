@@ -152,6 +152,7 @@ where:
   - `lib` - library
 - `-E, --entryPoint` (string, optional) - Entry point (`main` by default)
 - `-D, --define` (string, optional) - Adds a macro definition to the list, optional range of possible values can be provided in `{}`
+- `-optD, --optionalDefine` (string, optional) - Omits the macro for empty values; see [Optional defines](#optional-defines)
 - `-O, --optimization` (int, optional) - Optimization level (global setting used by default)
 - `-o, --output` (string, optional) - Output directory override
 - `-s, --outputSuffix` (string, optional) - Suffix inserted before the first `.` in the filename (`Shader.cs.hlsl -s Test` produces `ShaderTest.cs.hlsl`)
@@ -175,6 +176,30 @@ Additionally, the config file parser supports:
 Config preprocessing uses the default compiler selected by the global `--compiler` option. Consequently, `#ifdef __SLANG__` reflects only the default compiler; config-local `--compilerDXIL` and `--compilerSPIRV` overrides define `__SLANG__` for the shader source but do not affect config preprocessing.
 
 Every active shader permutation must produce a unique output path. ShaderMake rejects duplicate outputs because compiling them concurrently would be unsafe.
+
+### Optional defines
+
+Use `-optD` (`--optionalDefine`) to leave a macro undefined for empty values. With regular `-D`, an empty value defines the macro without a value (`#define A`).
+
+| Config option   | Permutations   |
+| --------------- | -------------- |
+| `-D A={,1}`     | `A=`, `A=1`    |
+| `-optD A={,1}`  | omitted, `A=1` |
+| `-optD A={0,1}` | `A=0`, `A=1`   |
+| `-optD A=`      | omitted        |
+| `-optD A=1`     | `A=1`          |
+| `-optD A`       | `A=1`          |
+
+Each combination is compiled. For example, `-D B={0,1} -optD A={,1}` produces four permutations. To leave `A` undefined whenever `B=0`, use two config lines:
+
+```text
+Shader.hlsl -T ps -D B=0
+Shader.hlsl -T ps -D B=1 -optD A={,1}
+```
+
+This produces three permutations: `B=0`, `B=1`, and `A=1 B=1`.
+
+When looking up a permutation, include only its defined macros in the `ShaderConstant` array. Use zero constants if none are defined.
 
 ### Output file naming
 

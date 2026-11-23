@@ -202,14 +202,22 @@ struct TaskData {
     string compiler;
     string outputFileWithoutExt;
     string combinedDefines;
+    string blobName;
     uint32_t optimizationLevel = 3;
     CompilerType compilerType = COMPILER_DXC;
     bool noRegShifts = false;
+    bool needsCompile = true;
+    bool needsBlobAssembly = false;
 };
 
 struct BlobEntry {
     string permutationFileWithoutExt;
     string combinedDefines;
+};
+
+struct BlobData {
+    vector<BlobEntry> entries;
+    bool needsCompile = false;
 };
 
 struct BuildSignature {
@@ -220,7 +228,7 @@ struct BuildSignature {
 
 Options g_Options;
 map<fs::path, fs::file_time_type> g_HierarchicalUpdateTimes;
-map<string, vector<BlobEntry>> g_ShaderBlobs;
+map<string, BlobData> g_ShaderBlobs;
 map<string, uint32_t> g_OutputLines;
 map<string, BuildSignature> g_CompilerAliasBuildSignatures;
 vector<TaskData> g_TaskData;
@@ -1544,35 +1552,136 @@ bool Options::Parse(int32_t argc, const char** argv) {
     return true;
 }
 
+static inline std::array<argparse_option, 16> GetConfigLineOptions(ConfigLine& config, const char*& unused) {
+    return {{
+        OPT_STRING('T', "profile", &config.profile, "Shader profile", nullptr, 0, 0),
+        OPT_STRING('E', "entryPoint", &config.entryPoint, "(Optional) entry point", nullptr, 0, 0),
+        OPT_STRING('D', "define", &unused, "(Optional) define(s) in forms 'M=value' or 'M'", AddOptionValue<string>, (intptr_t)&config.defines, 0),
+        OPT_STRING(0, "optionalDefine", &unused, "Empty values omit the define (-optD NAME[=value])", AddOptionValue<string>, (intptr_t)&config.defines, 0),
+        OPT_STRING('o', "output", &config.outputDir, "(Optional) output subdirectory", nullptr, 0, 0),
+        OPT_INTEGER('O', "optimization", &config.optimizationLevel, "(Optional) optimization level", nullptr, 0, 0),
+        OPT_STRING('s', "outputSuffix", &config.outputSuffix, "(Optional) suffix to insert before the first filename extension", nullptr, 0, 0),
+        OPT_STRING('m', "shaderModel", &config.shaderModel, "(Optional) shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
+        OPT_STRING(0, "compilerDXIL", &config.compilerDXIL, "(Optional) compiler alias used only for DXIL", nullptr, 0, 0),
+        OPT_STRING(0, "compilerSPIRV", &config.compilerSPIRV, "(Optional) compiler alias used only for SPIRV", nullptr, 0, 0),
+        OPT_STRING('X', "compilerOptions", &unused, "Custom command line options for the compiler, separated by spaces", AddOptionValue<string>, (intptr_t)&config.compilerOptions, 0),
+        OPT_BOOLEAN(0, "noRegShifts", &config.noRegShifts, "Don't specify any register shifts for this shader", nullptr, 0, 0),
+        OPT_STRING(0, "compilerOptionsDXIL", &unused, "Custom command line options for dxil, separated by spaces", AddOptionValue<string>, (intptr_t)&config.compilerOptionsDXIL, 0),
+        OPT_STRING(0, "compilerOptionsSPIRV", &unused, "Custom command line options for spirv, separated by spaces", AddOptionValue<string>, (intptr_t)&config.compilerOptionsSPIRV, 0),
+        OPT_STRING(0, "metalShaderConverterOptions", &unused, "Custom command line options for 'metal-shaderconverter', separated by spaces", AddOptionValue<string>, (intptr_t)&config.metalShaderConverterOptions, 0),
+        OPT_END(),
+    }};
+}
+
+static inline bool IsOptionalDefineArgument(const char* value) {
+    if (!isalpha((unsigned char)*value) && *value != '_')
+        return false;
+
+    for (value++; *value && *value != '='; value++) {
+        if (!isalnum((unsigned char)*value) && *value != '_')
+            return false;
+    }
+    return true;
+}
+
+static inline bool ReadConfigToken(const string& line, size_t& cursor, string& token, pair<size_t, size_t>& range) {
+    while (cursor < line.size() && line[cursor]) {
+        token.clear();
+        while (cursor < line.size() && line[cursor] == ' ')
+            cursor++;
+        range.first = cursor;
+
+        bool quoted = false;
+        while (cursor < line.size() && line[cursor] && (quoted || line[cursor] != ' ')) {
+            char ch = line[cursor++];
+            if (ch == '"')
+                quoted = !quoted;
+            else
+                token += ch;
+        }
+        range.second = cursor;
+        if (!token.empty())
+            return true;
+    }
+    return false;
+}
+
+static inline bool FindOptionalDefine(const string& line, pair<size_t, size_t>& range, string& definition) {
+    if (line.find("--optionalDefine") == string::npos && line.find("-optD") == string::npos)
+        return false;
+
+    size_t cursor = 0;
+    string arg;
+    pair<size_t, size_t> argRange;
+    if (!ReadConfigToken(line, cursor, arg, argRange))
+        return false;
+
+    ConfigLine config;
+    const char* unused = nullptr;
+    auto options = GetConfigLineOptions(config, unused);
+    while (ReadConfigToken(line, cursor, arg, argRange)) {
+        if (arg == "--")
+            break;
+
+        string optionValue;
+        pair<size_t, size_t> valueRange = argRange;
+
+        // An attached -o output path keeps its existing meaning
+        if (arg == "-optD") {
+            size_t next = cursor;
+            if (ReadConfigToken(line, next, optionValue, valueRange) && IsOptionalDefineArgument(optionValue.c_str())) {
+                range = {argRange.first, valueRange.second};
+                definition = optionValue;
+                return true;
+            }
+        }
+
+        const argparse_option* option = nullptr;
+        const char* value = nullptr;
+        for (const argparse_option& candidate : options) {
+            if (arg.size() > 1 && arg[0] == '-' && arg[1] == '-' && candidate.long_name) {
+                size_t length = strlen(candidate.long_name);
+                if (arg.compare(2, length, candidate.long_name) == 0 && (arg.size() == length + 2 || arg[length + 2] == '=')) {
+                    option = &candidate;
+                    if (arg.size() > length + 2)
+                        value = arg.c_str() + length + 3;
+                    break;
+                }
+            } else if (arg.size() > 1 && arg[0] == '-' && candidate.short_name == arg[1]) {
+                option = &candidate;
+                if (arg.size() > 2)
+                    value = arg.c_str() + 2;
+                break;
+            }
+        }
+        if (!option || option->type < ARGPARSE_OPT_INTEGER)
+            continue;
+
+        // Skip values of other options, including compiler-option strings
+        if (!value && ReadConfigToken(line, cursor, optionValue, valueRange))
+            value = optionValue.c_str();
+
+        if (option->long_name && strcmp(option->long_name, "optionalDefine") == 0) {
+            range = {argRange.first, valueRange.second};
+            definition = value ? value : "";
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ConfigLine::Parse(int32_t argc, const char** argv) {
     source = argv[0];
 
     const char* unused = nullptr; // storage for the callback
-    struct argparse_option options[] = {
-        OPT_STRING('T', "profile", &profile, "Shader profile", nullptr, 0, 0),
-        OPT_STRING('E', "entryPoint", &entryPoint, "(Optional) entry point", nullptr, 0, 0),
-        OPT_STRING('D', "define", &unused, "(Optional) define(s) in forms 'M=value' or 'M'", AddOptionValue<string>, (intptr_t)&defines, 0),
-        OPT_STRING('o', "output", &outputDir, "(Optional) output subdirectory", nullptr, 0, 0),
-        OPT_INTEGER('O', "optimization", &optimizationLevel, "(Optional) optimization level", nullptr, 0, 0),
-        OPT_STRING('s', "outputSuffix", &outputSuffix, "(Optional) suffix to insert before the first filename extension", nullptr, 0, 0),
-        OPT_STRING('m', "shaderModel", &shaderModel, "(Optional) shader model for DXIL/SPIRV (always SM 5.0 for DXBC): major_minor (e.g. 6_5, 6_10)", nullptr, 0, 0),
-        OPT_STRING(0, "compilerDXIL", &compilerDXIL, "(Optional) compiler alias used only for DXIL", nullptr, 0, 0),
-        OPT_STRING(0, "compilerSPIRV", &compilerSPIRV, "(Optional) compiler alias used only for SPIRV", nullptr, 0, 0),
-        OPT_STRING('X', "compilerOptions", &unused, "Custom command line options for the compiler, separated by spaces", AddOptionValue<string>, (intptr_t)&compilerOptions, 0),
-        OPT_BOOLEAN(0, "noRegShifts", &noRegShifts, "Don't specify any register shifts for this shader", nullptr, 0, 0),
-
-        OPT_STRING(0, "compilerOptionsDXIL", &unused, "Custom command line options for dxil, separated by spaces", AddOptionValue<string>, (intptr_t)&compilerOptionsDXIL, 0),
-        OPT_STRING(0, "compilerOptionsSPIRV", &unused, "Custom command line options for spirv, separated by spaces", AddOptionValue<string>, (intptr_t)&compilerOptionsSPIRV, 0),
-        OPT_STRING(0, "metalShaderConverterOptions", &unused, "Custom command line options for 'metal-shaderconverter', separated by spaces", AddOptionValue<string>, (intptr_t)&metalShaderConverterOptions, 0),
-        OPT_END(),
-    };
+    auto options = GetConfigLineOptions(*this, unused);
 
     static const char* usages[] = {
-        "path/to/shader -T profile [-E entry] [-O{0|1|2|3}] [-o \"output/subdirectory\"] [-s \"suffix\"] [-m 6_5] [--compilerDXIL NAME] [--compilerSPIRV NAME] [-D DEF1={0,1}] [-D DEF2={0,1,2}] [-D DEF3] [-X \"options\"] [...]",
+        "path/to/shader -T profile [-E entry] [-O{0|1|2|3}] [-o \"output/subdirectory\"] [-s \"suffix\"] [-m 6_5] [--compilerDXIL NAME] [--compilerSPIRV NAME] [-D DEF1={0,1}] [-D DEF2={0,1,2}] [-D DEF3] [-optD OPTIONAL={,1}] [-X \"options\"] [...]",
         nullptr};
 
     struct argparse argparse;
-    argparse_init(&argparse, options, usages, 0);
+    argparse_init(&argparse, options.data(), usages, 0);
     argparse_describe(&argparse, nullptr, "\nConfiguration options for a shader");
     argparse_parse(&argparse, argc, argv);
 
@@ -1969,7 +2078,7 @@ static void ExeCompile() {
         }
 
         // Convert to headers if needed
-        if (isSucceeded && (g_Options.header || (g_Options.headerBlob && taskData.combinedDefines.empty()))) {
+        if (isSucceeded && (g_Options.header || (g_Options.headerBlob && !taskData.needsBlobAssembly))) {
             vector<uint8_t> buffer;
             if (ReadBinaryFile(outputFile.c_str(), buffer)) {
                 string headerFile = taskData.outputFileWithoutExt + g_OutputExt + ".h";
@@ -1982,7 +2091,7 @@ static void ExeCompile() {
 
                     // Keep binaries needed by blob creation or as final output
                     bool isNeededByBlob = g_Options.binaryBlob
-                        || (g_Options.headerBlob && !taskData.combinedDefines.empty());
+                        || (g_Options.headerBlob && taskData.needsBlobAssembly);
                     if (!g_Options.binary && !isNeededByBlob) {
                         try {
                             fs::remove(outputFile);
@@ -2122,7 +2231,7 @@ static bool GetHierarchicalUpdateTime(const fs::path& file, list<fs::path>& call
     return true;
 }
 
-static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::file_time_type& configTime) {
+static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::file_time_type& configTime, bool hasOptionalDefines) {
     // Tokenize
     string lineCopy = line;
     vector<const char*> tokens;
@@ -2218,7 +2327,8 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
 
     // Compiled permutation name
     fs::path permutationName = shaderName;
-    if (!configLine.defines.empty()) {
+    bool needsBlobAssembly = g_Options.IsBlob() && (hasOptionalDefines || !configLine.defines.empty());
+    if (!configLine.defines.empty() || needsBlobAssembly) {
         uint32_t permutationHash = HashToUint(hash<string>()(combinedDefines));
 
         char buf[16];
@@ -2270,6 +2380,7 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     outputFile += ".h";
     UpdateOutputTime(outputFile, g_Options.headerBlob, force, outputTime);
 
+    bool needsCompile = true;
     if (!force) {
         list<fs::path> callStack;
         fs::file_time_type sourceTime;
@@ -2289,9 +2400,10 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
             }
         }
 
-        if (outputTime > sourceTime)
-            return true;
+        needsCompile = outputTime <= sourceTime;
     }
+    if (!needsCompile && !g_Options.IsBlob())
+        return true;
 
     // Prepare a task
     string outputFileWithoutExt = PathToString(outputDir / permutationName);
@@ -2308,6 +2420,8 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
     taskData.compilerType = compilerType;
     taskData.combinedDefines = combinedDefines;
     taskData.outputFileWithoutExt = outputFileWithoutExt;
+    taskData.needsCompile = needsCompile;
+    taskData.needsBlobAssembly = needsBlobAssembly;
     taskData.defines = configLine.defines;
     if (taskData.compilerType == COMPILER_SLANG && !HasDefine(g_Options.defines, "__SLANG__"))
         AddImplicitDefine(taskData.defines, "__SLANG__");
@@ -2322,22 +2436,43 @@ static bool ProcessConfigLine(uint32_t lineIndex, const string& line, const fs::
 
     // Gather blobs
     if (g_Options.IsBlob()) {
-        string blobName = PathToString(outputDir / shaderName);
-        vector<BlobEntry>& entries = g_ShaderBlobs[blobName];
+        taskData.blobName = PathToString(outputDir / shaderName);
+        BlobData& blob = g_ShaderBlobs[taskData.blobName];
+        blob.needsCompile |= needsCompile;
 
         BlobEntry entry;
         entry.permutationFileWithoutExt = outputFileWithoutExt;
         entry.combinedDefines = combinedDefines;
-        entries.push_back(entry);
+        blob.entries.push_back(entry);
     }
 
     return true;
 }
 
-static bool ExpandPermutations(uint32_t lineIndex, const string& line, const fs::file_time_type& configTime) {
+static bool ExpandPermutations(uint32_t lineIndex, const string& line, const fs::file_time_type& configTime, bool hasOptionalDefines = false) {
     size_t opening = line.find('{');
-    if (opening == string::npos)
-        return ProcessConfigLine(lineIndex, line, configTime);
+    if (opening == string::npos) {
+        pair<size_t, size_t> range;
+        string definition;
+        if (!FindOptionalDefine(line, range, definition))
+            return ProcessConfigLine(lineIndex, line, configTime, hasOptionalDefines);
+
+        if (!IsOptionalDefineArgument(definition.c_str())) {
+            Printf(RED "%s(%u,0): ERROR: Optional define must use NAME or NAME=value!\n", PathToString(g_Options.configFile).c_str(), lineIndex + 1);
+            return false;
+        }
+        size_t equal = definition.find('=');
+        if (equal == string::npos) {
+            equal = definition.size();
+            definition += "=1";
+        }
+
+        string replacement;
+        if (equal + 1 < definition.size())
+            replacement = "-D \"" + definition + "\"";
+        string newConfig = line.substr(0, range.first) + replacement + line.substr(range.second);
+        return ExpandPermutations(lineIndex, newConfig, configTime, true);
+    }
 
     size_t closing = line.find('}', opening);
     if (closing == string::npos) {
@@ -2353,7 +2488,7 @@ static bool ExpandPermutations(uint32_t lineIndex, const string& line, const fs:
             comma = closing;
 
         string newConfig = line.substr(0, opening) + line.substr(current, comma - current) + line.substr(closing + 1);
-        if (!ExpandPermutations(lineIndex, newConfig, configTime))
+        if (!ExpandPermutations(lineIndex, newConfig, configTime, hasOptionalDefines))
             return false;
 
         current = comma + 1;
@@ -2511,6 +2646,15 @@ int32_t main(int32_t argc, const char** argv) {
         }
     }
 
+    // Rebuild complete blobs when intermediate binaries were removed
+    g_TaskData.erase(remove_if(g_TaskData.begin(), g_TaskData.end(), [](const TaskData& task) {
+        if (task.needsCompile)
+            return false;
+        if (g_Options.binary)
+            return true;
+        return !g_ShaderBlobs.at(task.blobName).needsCompile;
+    }), g_TaskData.end());
+
     bool buildSignatureNeedsWrite = buildSignatureChanged || !g_TaskData.empty();
     if (buildSignatureNeedsWrite && !InvalidateBuildSignature(buildSignaturePath))
         return 1;
@@ -2553,17 +2697,21 @@ int32_t main(int32_t argc, const char** argv) {
             return 1;
 
         // Dump shader blobs
-        for (const auto& [blobName, blobEntries] : g_ShaderBlobs) {
-            // A single no-define entry already has the final blob filename
-            if (blobEntries.size() == 1 && blobEntries[0].combinedDefines.empty())
+        for (const auto& [blobName, blob] : g_ShaderBlobs) {
+            if (!blob.needsCompile)
+                continue;
+            const vector<BlobEntry>& blobEntries = blob.entries;
+
+            // A standalone default already has the final blob filename
+            if (blobEntries.size() == 1 && blobEntries[0].permutationFileWithoutExt == blobName)
                 continue;
 
-            // Mixing no-define entries with permutations would overwrite blob output
+            // Blob inputs must have separate intermediate filenames
             bool invalidEntry = false;
             for (const auto& entry : blobEntries) {
-                if (entry.combinedDefines.empty()) {
+                if (entry.permutationFileWithoutExt == blobName) {
                     const string blobBaseName = fs::path(blobName).stem().generic_string();
-                    Printf(RED "ERROR: Cannot create a blob for shader %s where some permutation(s) have no definitions!", blobBaseName.c_str());
+                    Printf(RED "ERROR: Cannot create a blob for shader %s where an input file has the blob output name!", blobBaseName.c_str());
                     invalidEntry = true;
                     break;
                 }
