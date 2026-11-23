@@ -2067,12 +2067,9 @@ static void ExeCompile() {
                     context.WriteDataAsText(buffer.data(), buffer.size());
                     context.WriteTextEpilog();
 
-                    // Try to delete the binary file if it's not requested.
-                    // Keep it if a blob still needs it: blob creation reads the per-permutation binaries
-                    // later and removes them itself, and with no defines the binary is the binary blob.
-                    // In the unlikely event it fails (one system sometimes holds the file handle too long),
-                    // avoid a fatal exit because it's merely an intermediate file.
-                    bool isNeededByBlob = g_Options.binaryBlob || (g_Options.headerBlob && !taskData.combinedDefines.empty());
+                    // Keep binaries needed by blob creation or as final output.
+                    bool isNeededByBlob = g_Options.binaryBlob
+                        || (g_Options.headerBlob && !taskData.combinedDefines.empty());
                     if (!g_Options.binary && !isNeededByBlob) {
                         try {
                             fs::remove(outputFile);
